@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { buildMatrix, parseBenchmarks } = require("./matrix");
-const { profile } = require("./profile");
+const { profile, summarizeCallgrind } = require("./profile");
 const { createReport } = require("./report");
 const { appendSummary, getInput, getIntegerInput, setOutput } = require("./utils");
 
@@ -17,18 +17,32 @@ function discover() {
 
 function runProfile() {
   const outputDirectory = getInput("output-dir", "callgrinder");
-  const callgrindArgs = getInput("callgrind-args");
-  const result = profile({
-    name: getInput("name", "profile"),
-    command: getInput("command"),
-    events: getInput("events", "0"),
-    run: getIntegerInput("run", 1, 1),
-    config: getInput("config"),
-    callgrindArgs: callgrindArgs ? callgrindArgs.split(/\s+/).filter(Boolean) : [],
-    outputDirectory,
-    workingDirectory: path.resolve(getInput("working-directory", process.cwd())),
-    timeoutSeconds: getIntegerInput("timeout-seconds", 0),
-  });
+  const fromCallgrind = getInput("from-callgrind");
+  let result;
+  if (fromCallgrind) {
+    // Summarize a callgrind file the caller produced (e.g. GEMC runs valgrind its own way).
+    result = summarizeCallgrind({
+      name: getInput("name", "profile"),
+      callgrindFile: fromCallgrind,
+      config: getInput("config"),
+      events: getInput("events", "0"),
+      command: getInput("command"),
+      outputDirectory,
+    });
+  } else {
+    const callgrindArgs = getInput("callgrind-args");
+    result = profile({
+      name: getInput("name", "profile"),
+      command: getInput("command"),
+      events: getInput("events", "0"),
+      run: getIntegerInput("run", 1, 1),
+      config: getInput("config"),
+      callgrindArgs: callgrindArgs ? callgrindArgs.split(/\s+/).filter(Boolean) : [],
+      outputDirectory,
+      workingDirectory: path.resolve(getInput("working-directory", process.cwd())),
+      timeoutSeconds: getIntegerInput("timeout-seconds", 0),
+    });
+  }
   setOutput("results-dir", path.resolve(outputDirectory));
   setOutput("callgrind-file", result.callgrindFile);
   setOutput("result-file", result.partialFile);

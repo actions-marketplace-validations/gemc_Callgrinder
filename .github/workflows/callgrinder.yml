@@ -16,11 +16,6 @@ on:
         description: Container image with the built app, valgrind, and Node.js 24.
         required: true
         type: string
-      ref:
-        description: Ref of this action to check out for the reusable steps.
-        required: false
-        default: v1
-        type: string
 
 permissions:
   contents: read
@@ -34,9 +29,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: gemc/Callgrinder
-          ref: ${{ inputs.ref }}
+          ref: v1
       - id: discover
-        uses: gemc/Callgrinder@${{ inputs.ref }}
+        uses: gemc/Callgrinder@v1
         with:
           mode: discover
           benchmarks: ${{ inputs.benchmarks }}
@@ -53,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Profile ${{ matrix.name }}
-        uses: gemc/Callgrinder@${{ inputs.ref }}
+        uses: gemc/Callgrinder@v1
         with:
           mode: profile
           name: ${{ matrix.name }}
@@ -76,12 +71,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: gemc/Callgrinder
-          ref: ${{ inputs.ref }}
+          ref: v1
       - uses: actions/download-artifact@v7
         with:
           pattern: callgrinder-part-*
           path: callgrinder-parts
-      - uses: gemc/Callgrinder@${{ inputs.ref }}
+      - uses: gemc/Callgrinder@v1
         with:
           mode: report
           input-dir: callgrinder-parts

@@ -15,30 +15,20 @@ function expandCommand(command, { events, name, run }) {
     .replace(/\{run\}/g, String(run));
 }
 
-function profile({
+// Annotate an existing callgrind file (both passes), render the section, and write the partial JSON.
+// Shared by `profile` (after it runs valgrind) and the `--from-callgrind` path, which lets a caller run
+// valgrind its own way and hand Callgrinder the resulting profile.
+function summarizeCallgrind({
   name,
-  command,
-  events = 0,
-  run = 1,
+  callgrindFile,
   config: configSource,
-  callgrindArgs = [],
+  events = 0,
+  command = "",
   outputDirectory = "callgrinder",
-  workingDirectory = ".",
-  timeoutSeconds = 0,
 }) {
   const config = loadConfig(configSource);
   const slug = slugify(name);
   ensureDirectory(outputDirectory);
-  const callgrindFile = path.resolve(outputDirectory, `callgrind.out.${slug}`);
-  const expanded = expandCommand(command, { events, name, run });
-
-  runCallgrind({
-    command: expanded,
-    outFile: callgrindFile,
-    extraArgs: callgrindArgs,
-    workingDirectory,
-    timeoutSeconds,
-  });
 
   const inclusive = parseAnnotate(annotate(callgrindFile, { inclusive: true }));
   let selfRows = [];
@@ -60,7 +50,7 @@ function profile({
   const partial = {
     name,
     slug,
-    command: expanded,
+    command,
     events,
     cost: config.cost || "CEst",
     callgrind_file: path.basename(callgrindFile),
@@ -70,7 +60,39 @@ function profile({
   const partialFile = path.resolve(outputDirectory, `profile-${slug}.json`);
   fs.writeFileSync(partialFile, `${JSON.stringify(partial, null, 2)}\n`, "utf8");
 
-  return { partial, partialFile, callgrindFile, markdown: rendered.markdown + topNote };
+  return {
+    partial,
+    partialFile,
+    callgrindFile: path.resolve(callgrindFile),
+    markdown: rendered.markdown + topNote,
+  };
 }
 
-module.exports = { expandCommand, profile };
+function profile({
+  name,
+  command,
+  events = 0,
+  run = 1,
+  config,
+  callgrindArgs = [],
+  outputDirectory = "callgrinder",
+  workingDirectory = ".",
+  timeoutSeconds = 0,
+}) {
+  const slug = slugify(name);
+  ensureDirectory(outputDirectory);
+  const callgrindFile = path.resolve(outputDirectory, `callgrind.out.${slug}`);
+  const expanded = expandCommand(command, { events, name, run });
+
+  runCallgrind({
+    command: expanded,
+    outFile: callgrindFile,
+    extraArgs: callgrindArgs,
+    workingDirectory,
+    timeoutSeconds,
+  });
+
+  return summarizeCallgrind({ name, callgrindFile, config, events, command: expanded, outputDirectory });
+}
+
+module.exports = { expandCommand, profile, summarizeCallgrind };

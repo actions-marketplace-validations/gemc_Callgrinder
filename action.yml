@@ -14,6 +14,9 @@ inputs:
   command:
     description: Command to profile. May contain {events}, {name}, and {run} placeholders.
     required: false
+  from-callgrind:
+    description: Summarize this existing callgrind.out file instead of running a command (profile mode).
+    required: false
   name:
     description: Human-readable profile name used in the summary and output filenames.
     required: false

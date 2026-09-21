@@ -5,14 +5,16 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { profile } = require("./profile");
+const { profile, summarizeCallgrind } = require("./profile");
 const { createReport } = require("./report");
 
 const USAGE = `Usage:
-  callgrinder <command> [options]      Profile a command under callgrind and print its summary.
-  callgrinder report [options]         Aggregate partial JSON files into summary.md + CSV.
+  callgrinder <command> [options]              Profile a command under callgrind and print its summary.
+  callgrinder --from-callgrind FILE [options]  Summarize an existing callgrind.out file (no run).
+  callgrinder report [options]                 Aggregate partial JSON files into summary.md + CSV.
 
 Options:
+  --from-callgrind FILE    Summarize this existing callgrind file instead of running a command.
   --name NAME              Profile name (default: profile).
   --events N               Value for the {events} placeholder (default: 0).
   --config FILE            JSON category config (see README).
@@ -31,6 +33,7 @@ quote inner arguments that contain spaces, e.g.:
 function parseArgs(argv) {
   const options = { command: null, mode: "profile" };
   const map = {
+    "--from-callgrind": "fromCallgrind",
     "--name": "name",
     "--events": "events",
     "--config": "config",
@@ -67,7 +70,20 @@ function main() {
       outputDirectory: options.outputDirectory || "callgrinder",
     });
     process.stdout.write(`${fs.readFileSync(result.summaryFile, "utf8")}\n`);
-    process.stdout.write(`Wrote ${result.summaryFile}, ${result.csvFile}\n`);
+    process.stderr.write(`Wrote ${result.summaryFile}, ${result.csvFile}\n`);
+    return;
+  }
+  if (options.fromCallgrind) {
+    const summarized = summarizeCallgrind({
+      name: options.name || "profile",
+      callgrindFile: options.fromCallgrind,
+      config: options.config,
+      events: options.events || "0",
+      command: options.command || "",
+      outputDirectory: options.outputDirectory || "callgrinder",
+    });
+    process.stdout.write(`${summarized.markdown}\n`);
+    process.stderr.write(`Wrote ${summarized.partialFile}\n`);
     return;
   }
   if (!options.command) {
@@ -85,7 +101,7 @@ function main() {
     timeoutSeconds: options.timeoutSeconds ? Number(options.timeoutSeconds) : 0,
   });
   process.stdout.write(`${result.markdown}\n`);
-  process.stdout.write(`Wrote ${result.partialFile} and ${result.callgrindFile}\n`);
+  process.stderr.write(`Wrote ${result.partialFile} and ${result.callgrindFile}\n`);
 }
 
 try {

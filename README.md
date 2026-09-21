@@ -57,6 +57,13 @@ argument, and quote inner arguments that contain spaces:
 Callgrinder runs the command as `valgrind --tool=callgrind … bash -c "exec <command>"`, so `exec` makes the
 shell hand its process to your binary and callgrind profiles the binary directly rather than the shell.
 
+If you would rather run `valgrind` yourself — for example to pass complex, space-containing arguments as a
+shell array with no re-quoting — hand Callgrinder the resulting file and it only summarizes:
+
+```shell
+callgrinder --from-callgrind callgrind.out.my-workload --name my-workload --config ci/callgrinder.json
+```
+
 <br/>
 
 ## The category config
