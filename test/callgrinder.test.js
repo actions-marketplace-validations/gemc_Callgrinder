@@ -1,0 +1,82 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const { cest, isNamedRoutine, locationToFunc, parseAnnotate } = require("../src/callgrind");
+const { collectRows, loadConfig } = require("../src/categories");
+const { renderProfile, topRoutines } = require("../src/report");
+
+// A synthetic callgrind_annotate --inclusive output, with the (NN%) percentages callgrind adds.
+const ANNOTATE = `Events shown:     Ir I1mr D1mr D1mw ILmr DLmr DLmw
+--------------------------------------------------------------------------------
+1,000,000,000 (100.0%)  0  0  0  0  0  0  PROGRAM TOTALS
+--------------------------------------------------------------------------------
+  400,000,000 (40.0%)  0  0  0  0  0  0  /o/G4PropagatorInField.cc:G4PropagatorInField::ComputeStep(G4FieldTrack&)
+  120,000,000 (12.0%)  0  0  0  0  0  0  /o/gfield.cc:GField_AsciiMapFactory::GetFieldValue(double const*, double*) const (5,539,090x)
+   80,000,000 (8.0%)  0  0  0  0  0  0  /o/flux.cc:GFluxDigitization::digitizeHit(GHit*, unsigned long) [/o/flux.gplugin]
+    2,000,000 (0.2%)  0  0  0  0  0  0  events annotated
+   50,000,000 (5.0%)  0  0  0  0  0  0  0x0000000009fe6140 (20x)
+`;
+
+test("cest applies the KCachegrind cache formula", () => {
+  assert.equal(cest({ Ir: 100, I1mr: 1, D1mr: 1, ILmr: 1 }), 100 + 10 * 2 + 100 * 1);
+});
+
+test("percentages, call counts, objects, and unresolved addresses are cleaned", () => {
+  assert.equal(locationToFunc("a.cc:Foo::Bar(int) const (5,539,090x)"), "Foo::Bar(int) const");
+  assert.equal(locationToFunc("0x00000000118e8b70 (99x) [/o/libG4.so]"), "0x00000000118e8b70 in libG4.so");
+  assert.equal(locationToFunc("0x0000000009fe6140 (20x)"), "0x0000000009fe6140 (unresolved)");
+});
+
+test("summary artifacts are filtered from routine lists", () => {
+  assert.equal(isNamedRoutine("events annotated"), false);
+  assert.equal(isNamedRoutine("__ieee754_atan2_fma"), true);
+  assert.equal(isNamedRoutine("Foo::Bar(int, int)"), true);
+});
+
+test("parseAnnotate tolerates percentages and finds totals + rows", () => {
+  const { total, rows } = parseAnnotate(ANNOTATE);
+  assert.equal(cest(total), 1_000_000_000);
+  const funcs = rows.map(([func]) => func);
+  assert.ok(funcs.includes("G4PropagatorInField::ComputeStep(G4FieldTrack&)"));
+  assert.ok(funcs.some((f) => f.startsWith("0x0000000009fe6140")));
+});
+
+test("category table reports inclusive and self costs from the two passes", () => {
+  const incl = parseAnnotate(ANNOTATE).rows;
+  const self = [
+    ["GField_AsciiMapFactory::GetFieldValue(double const*, double*) const", { Ir: 40_000_000 }],
+    ["G4PropagatorInField::ComputeStep(G4FieldTrack&)", { Ir: 1_000_000 }],
+  ];
+  const config = loadConfig(
+    JSON.stringify({
+      categories: [
+        { label: "Track swimming", match: "G4PropagatorInField::ComputeStep" },
+        { family: "Field evaluation", discover: "(GField_[A-Za-z0-9_]*)::GetFieldValue" },
+        { family: "Digitization", discover: "([A-Za-z_]\\w*)::digitizeHit" },
+      ],
+    }),
+  );
+  const rows = collectRows(config, incl, self);
+  const field = rows.find((r) => r.label.startsWith("Field evaluation"));
+  assert.equal(field.incl, 120_000_000);
+  assert.equal(field.self, 40_000_000);
+  const swim = rows.find((r) => r.label === "Track swimming");
+  assert.equal(swim.self, 1_000_000);
+  assert.ok(rows.some((r) => r.label === "Digitization: GFluxDigitization"));
+});
+
+test("renderProfile emits both tables and excludes the artifact routine", () => {
+  const { total, rows } = parseAnnotate(ANNOTATE);
+  const config = loadConfig(JSON.stringify({ categories: [{ family: "F", discover: "(GField_\\w+)::GetFieldValue" }] }));
+  const { markdown } = renderProfile({ title: "t", config, inclTotal: total, inclRows: rows, selfRows: rows });
+  assert.match(markdown, /\| Category \| Entry symbol\(s\) \| CEst \(Mcycles\) \| % of run \| Self % \|/);
+  assert.match(markdown, /Top \d+ routines by self time/);
+  assert.doesNotMatch(markdown, /events annotated/);
+});
+
+test("topRoutines ranks by self cost and drops artifacts", () => {
+  const rows = parseAnnotate(ANNOTATE).rows;
+  const ranked = topRoutines(rows, 10).map(([func]) => func);
+  assert.equal(ranked[0], "G4PropagatorInField::ComputeStep(G4FieldTrack&)");
+  assert.ok(!ranked.includes("events annotated"));
+});

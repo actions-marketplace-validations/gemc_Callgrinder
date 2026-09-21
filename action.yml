@@ -1,0 +1,75 @@
+name: Callgrinder
+description: Profile a command with Valgrind callgrind and report per-category and per-routine CEst costs.
+author: GEMC Collaboration
+
+branding:
+  color: purple
+  icon: cpu
+
+inputs:
+  mode:
+    description: "Operation to perform: profile, report, or discover."
+    required: false
+    default: profile
+  command:
+    description: Command to profile. May contain {events}, {name}, and {run} placeholders.
+    required: false
+  name:
+    description: Human-readable profile name used in the summary and output filenames.
+    required: false
+    default: profile
+  events:
+    description: Value substituted for the {events} placeholder (a workload size).
+    required: false
+    default: "0"
+  run:
+    description: Run number substituted for the {run} placeholder.
+    required: false
+    default: "1"
+  config:
+    description: JSON category config (a file path or inline JSON). See the README for the schema.
+    required: false
+  callgrind-args:
+    description: Extra flags appended to the callgrind invocation (space separated).
+    required: false
+  timeout-seconds:
+    description: Timeout for the profiled command; zero disables the timeout.
+    required: false
+    default: "0"
+  working-directory:
+    description: Directory in which the profiled command runs.
+    required: false
+    default: .
+  output-dir:
+    description: Directory for the callgrind file, partial JSON, or final report.
+    required: false
+    default: callgrinder
+  input-dir:
+    description: Directory recursively containing partial JSON files in report mode.
+    required: false
+    default: callgrinder-parts
+  benchmarks:
+    description: JSON array of profiles used by discover mode to create a job matrix.
+    required: false
+
+outputs:
+  matrix:
+    description: Dynamic GitHub Actions matrix generated in discover mode.
+  job-count:
+    description: Number of matrix jobs generated in discover mode.
+  callgrind-file:
+    description: Absolute path to the callgrind.out file written in profile mode.
+  result-file:
+    description: Partial JSON file written in profile mode.
+  results-dir:
+    description: Absolute output directory written by profile or report mode.
+  summary-file:
+    description: Markdown summary file written in report mode.
+  csv-file:
+    description: Per-category CSV file written in report mode.
+  json-file:
+    description: Aggregated JSON file written in report mode.
+
+runs:
+  using: node24
+  main: src/main.js

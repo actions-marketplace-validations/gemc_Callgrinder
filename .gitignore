@@ -1,0 +1,5 @@
+node_modules/
+callgrinder/
+callgrinder-parts/
+*.callgrind.out
+callgrind.out.*

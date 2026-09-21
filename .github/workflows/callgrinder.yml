@@ -1,0 +1,87 @@
+name: Callgrinder
+
+# Reusable discover -> profile (matrix) -> report workflow. A caller passes a JSON `benchmarks` array
+# and a base image that already has the built application plus valgrind, and gets one job per profile
+# plus a combined summary. Prepare each profile's working directory (build, geometry, ...) in the
+# `setup` input run before this workflow, or bake it into the image.
+
+on:
+  workflow_call:
+    inputs:
+      benchmarks:
+        description: JSON array of profiles ({name, command, events, config, working_directory}).
+        required: true
+        type: string
+      image:
+        description: Container image with the built app, valgrind, and Node.js 24.
+        required: true
+        type: string
+      ref:
+        description: Ref of this action to check out for the reusable steps.
+        required: false
+        default: v1
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: gemc/Callgrinder
+          ref: ${{ inputs.ref }}
+      - id: discover
+        uses: gemc/Callgrinder@${{ inputs.ref }}
+        with:
+          mode: discover
+          benchmarks: ${{ inputs.benchmarks }}
+
+  profile:
+    needs: discover
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ inputs.image }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Profile ${{ matrix.name }}
+        uses: gemc/Callgrinder@${{ inputs.ref }}
+        with:
+          mode: profile
+          name: ${{ matrix.name }}
+          command: ${{ matrix.command }}
+          events: ${{ matrix.events }}
+          config: ${{ matrix.config }}
+          working-directory: ${{ matrix.working_directory }}
+          output-dir: callgrinder-parts
+      - name: Upload partial
+        uses: actions/upload-artifact@v7
+        with:
+          name: callgrinder-part-${{ matrix.name }}
+          path: callgrinder-parts
+
+  report:
+    needs: profile
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: gemc/Callgrinder
+          ref: ${{ inputs.ref }}
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: callgrinder-part-*
+          path: callgrinder-parts
+      - uses: gemc/Callgrinder@${{ inputs.ref }}
+        with:
+          mode: report
+          input-dir: callgrinder-parts
