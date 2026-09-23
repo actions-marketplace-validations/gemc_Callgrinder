@@ -142,22 +142,21 @@ function annotate(file, { inclusive = true } = {}) {
 // (properly quoted by the caller); `exec` makes bash replace itself so callgrind profiles the
 // target binary directly rather than the shell.
 function runCallgrind({ command, outFile, extraArgs = [], workingDirectory = ".", timeoutSeconds = 0 }) {
-  const shell = process.platform === "win32" ? null : "/bin/bash";
-  if (!shell) {
+  if (process.platform === "win32") {
     throw new Error("Callgrinder profiling requires a POSIX shell (Valgrind is not available on Windows)");
   }
-  const args = [
+  // bash execs valgrind, which runs the command's program as its direct child, so ONLY that program is
+  // profiled — not the launching shell, and not the program's own child processes (valgrind does not
+  // trace children by default). The command is a shell string so bash parses its quoted arguments; it
+  // must therefore be a program invocation, e.g. `gemc card.yaml -n 100` (not a wrapper that execs it).
+  const valgrind = [
+    "valgrind",
     "--tool=callgrind",
     `--callgrind-out-file=${outFile}`,
     ...DEFAULT_CALLGRIND_ARGS,
     ...extraArgs,
-    shell,
-    "-eo",
-    "pipefail",
-    "-c",
-    `exec ${command}`,
-  ];
-  const result = spawnSync("valgrind", args, {
+  ].join(" ");
+  const result = spawnSync("bash", ["-eo", "pipefail", "-c", `exec ${valgrind} ${command}`], {
     cwd: workingDirectory,
     stdio: "inherit",
     timeout: timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined,

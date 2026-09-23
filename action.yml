@@ -17,6 +17,9 @@ inputs:
   from-callgrind:
     description: Summarize this existing callgrind.out file instead of running a command (profile mode).
     required: false
+  program:
+    description: Program name to keep when the command runs several processes (e.g. gemc); defaults to the largest.
+    required: false
   name:
     description: Human-readable profile name used in the summary and output filenames.
     required: false
