@@ -1,9 +1,13 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { cest, isNamedRoutine, locationToFunc, parseAnnotate } = require("../src/callgrind");
 const { collectRows, loadConfig } = require("../src/categories");
 const { renderProfile, topRoutines } = require("../src/report");
+const { summarizeCallgrind } = require("../src/profile");
 
 // A synthetic callgrind_annotate --inclusive output, with the (NN%) percentages callgrind adds.
 const ANNOTATE = `Events shown:     Ir I1mr D1mr D1mw ILmr DLmr DLmw
@@ -79,4 +83,21 @@ test("topRoutines ranks by self cost and drops artifacts", () => {
   const ranked = topRoutines(rows, 10).map(([func]) => func);
   assert.equal(ranked[0], "G4PropagatorInField::ComputeStep(G4FieldTrack&)");
   assert.ok(!ranked.includes("events annotated"));
+});
+
+test("summarizeCallgrind degrades gracefully when annotate fails", () => {
+  // callgrind_annotate is not available in the test environment, so both passes fail; the summary
+  // must be a visible diagnostic (with the file size), not a thrown error.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "callgrinder-test-"));
+  const file = path.join(dir, "callgrind.out.x");
+  fs.writeFileSync(file, "");
+  const result = summarizeCallgrind({
+    name: "empty",
+    callgrindFile: file,
+    config: JSON.stringify({ categories: [] }),
+    outputDirectory: dir,
+  });
+  assert.match(result.markdown, /Profile summary unavailable/);
+  assert.match(result.markdown, /0 bytes/);
+  assert.ok(fs.existsSync(result.partialFile));
 });
