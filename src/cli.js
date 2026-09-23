@@ -15,7 +15,6 @@ const USAGE = `Usage:
 
 Options:
   --from-callgrind FILE    Summarize this existing callgrind file instead of running a command.
-  --program NAME           Program to keep when the command runs several processes (default: the largest).
   --name NAME              Profile name (default: profile).
   --events N               Value for the {events} placeholder (default: 0).
   --config FILE            JSON category config (see README).
@@ -35,7 +34,6 @@ function parseArgs(argv) {
   const options = { command: null, mode: "profile" };
   const map = {
     "--from-callgrind": "fromCallgrind",
-    "--program": "program",
     "--name": "name",
     "--events": "events",
     "--config": "config",
@@ -101,7 +99,6 @@ function main() {
     outputDirectory: options.outputDirectory || "callgrinder",
     workingDirectory: path.resolve(options.workingDirectory || process.cwd()),
     timeoutSeconds: options.timeoutSeconds ? Number(options.timeoutSeconds) : 0,
-    program: options.program || "",
   });
   process.stdout.write(`${result.markdown}\n`);
   process.stderr.write(`Wrote ${result.partialFile} and ${result.callgrindFile}\n`);

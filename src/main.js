@@ -41,7 +41,6 @@ function runProfile() {
       outputDirectory,
       workingDirectory: path.resolve(getInput("working-directory", process.cwd())),
       timeoutSeconds: getIntegerInput("timeout-seconds", 0),
-      program: getInput("program"),
     });
   }
   setOutput("results-dir", path.resolve(outputDirectory));
