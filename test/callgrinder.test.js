@@ -69,6 +69,23 @@ test("category table reports inclusive and self costs from the two passes", () =
   assert.ok(rows.some((r) => r.label === "Digitization: GFluxDigitization"));
 });
 
+test("self cost is not double counted when a symbol appears in several objects", () => {
+  // The same demangled symbol lives in two objects, so it appears in two inclusive rows (distinct
+  // functions, so their inclusive costs sum) but its self cost must be counted only once.
+  const incl = [
+    ["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 60_000_000 }],
+    ["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 40_000_000 }],
+  ];
+  const self = [["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 30_000_000 }]];
+  const config = loadConfig(
+    JSON.stringify({ categories: [{ label: "Hit collection", match: "GSensitiveDetector::ProcessHits" }] }),
+  );
+  const [row] = collectRows(config, incl, self);
+  assert.equal(row.incl, 100_000_000);
+  assert.equal(row.self, 30_000_000);
+  assert.ok(row.self <= row.incl);
+});
+
 test("renderProfile emits both tables and excludes the artifact routine", () => {
   const { total, rows } = parseAnnotate(ANNOTATE);
   const config = loadConfig(JSON.stringify({ categories: [{ family: "F", discover: "(GField_\\w+)::GetFieldValue" }] }));

@@ -1,6 +1,6 @@
 {
   "name": "callgrinder",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Profile a command with Valgrind callgrind and report per-category and per-routine CEst costs.",
   "license": "MIT",
   "type": "commonjs",

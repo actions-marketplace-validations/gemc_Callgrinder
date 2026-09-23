@@ -2,7 +2,6 @@ name: Test
 
 on:
   push:
-    branches: [ main ]
   pull_request:
 
 permissions:
@@ -18,3 +17,85 @@ jobs:
           node-version: 24
       - run: npm run check
       - run: npm test
+
+  callgrinder:
+    name: Callgrinder smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install Valgrind and build a test program
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind gcc
+          cat > "$RUNNER_TEMP/smoke.c" <<'EOF'
+          int main(void) {
+            volatile unsigned long sum = 0;
+            for (unsigned long i = 0; i < 100000; ++i) {
+              sum += i;
+            }
+            return sum == 0;
+          }
+          EOF
+          gcc -g -O0 "$RUNNER_TEMP/smoke.c" -o callgrinder-smoke
+      - name: Discover profiles
+        id: discover
+        uses: ./
+        with:
+          mode: discover
+          benchmarks: '[{"name":"smoke","command":"./callgrinder-smoke"}]'
+      - name: Profile the test program
+        id: profile
+        uses: ./
+        with:
+          mode: profile
+          name: ${{ fromJSON(steps.discover.outputs.matrix).include[0].name }}
+          command: ${{ fromJSON(steps.discover.outputs.matrix).include[0].command }}
+          config: '{"categories":[{"label":"Test workload","match":"^main$"}]}'
+          timeout-seconds: '60'
+          output-dir: callgrinder-parts
+      - name: Combine the report
+        id: report
+        uses: ./
+        with:
+          mode: report
+          input-dir: callgrinder-parts
+          output-dir: callgrinder-report
+      - name: Verify profile data and report outputs
+        env:
+          JOB_COUNT: ${{ steps.discover.outputs.job-count }}
+          PROFILE_FILE: ${{ steps.profile.outputs.result-file }}
+          CALLGRIND_FILE: ${{ steps.profile.outputs.callgrind-file }}
+          REPORT_FILE: ${{ steps.report.outputs.json-file }}
+          SUMMARY_FILE: ${{ steps.report.outputs.summary-file }}
+          CSV_FILE: ${{ steps.report.outputs.csv-file }}
+        run: |
+          node <<'EOF'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const read = (key) => fs.readFileSync(process.env[key], 'utf8');
+          assert.equal(process.env.JOB_COUNT, '1');
+          const profile = JSON.parse(read('PROFILE_FILE'));
+          assert.equal(profile.name, 'smoke');
+          assert.ok(profile.total.ir > 0, 'The target must produce instruction counts');
+          assert.ok(profile.total.cest > 0, 'The target must produce cycle estimates');
+          const workload = profile.categories.find((row) => row.label === 'Test workload');
+          assert.ok(workload && workload.self > 0, 'The target main function must be profiled');
+          assert.ok(profile.top_routines.some((row) => row.routine === 'main' && row.self > 0));
+          assert.match(read('CALLGRIND_FILE'), /events:.*Ir/);
+          assert.deepEqual(JSON.parse(read('REPORT_FILE')), [profile]);
+          assert.match(read('SUMMARY_FILE'), /Test workload/);
+          assert.doesNotMatch(read('SUMMARY_FILE'), /unavailable/i);
+          assert.match(read('CSV_FILE'), /"smoke","Test workload"/);
+          EOF
+      - name: Upload smoke test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: callgrinder-smoke
+          path: |
+            callgrinder-parts
+            callgrinder-report

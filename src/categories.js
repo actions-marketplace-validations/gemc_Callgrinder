@@ -38,7 +38,12 @@ function collectRows(config, inclRows, selfRows) {
   for (const [func, counts] of selfRows) {
     selfByFunc.set(func, (selfByFunc.get(func) || 0) + cest(counts));
   }
-  const selfOf = (funcs) => funcs.reduce((sum, func) => sum + (selfByFunc.get(func) || 0), 0);
+  // selfByFunc already aggregates every self row for a name, so each unique name is looked up once.
+  // A name can appear in several inclusive rows (the same demangled symbol living in more than one
+  // object, e.g. a per-detector plugin); counting its self cost per occurrence would multiply it and
+  // push Self % past 100%.
+  const selfOf = (funcs) =>
+    [...new Set(funcs)].reduce((sum, func) => sum + (selfByFunc.get(func) || 0), 0);
 
   const table = [];
   for (const category of config.categories) {
