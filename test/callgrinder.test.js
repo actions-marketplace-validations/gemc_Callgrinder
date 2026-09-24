@@ -124,11 +124,11 @@ test("renderProfile emits both tables and excludes the artifact routine", () => 
   const config = loadConfig(JSON.stringify({ categories: [{ family: "F", discover: "(GField_\\w+)::GetFieldValue" }] }));
   const { markdown } = renderProfile({ title: "t", config, inclTotal: total, inclRows: rows, selfRows: rows });
   assert.match(markdown, /\| Inclusive \(Mcycles\) \| Inclusive % \(overlapping\) \| Entry self % \|/);
-  assert.match(markdown, /Top \d+ routines by self cost/);
+  assert.match(markdown, /Top \d+ routines by inclusive cost/);
   assert.doesNotMatch(markdown, /events annotated/);
 });
 
-test("top-routine shares partition direct cost while inclusive category shares can overlap", () => {
+test("top routines are selected by inclusive share with that column before self share", () => {
   const config = loadConfig(JSON.stringify({
     top_routines: 2,
     categories: [{ label: "A", match: "^A$" }, { label: "B", match: "^B$" }],
@@ -137,19 +137,23 @@ test("top-routine shares partition direct cost while inclusive category shares c
     title: "Overlapping calls",
     config,
     inclTotal: { Ir: 1_000_000 },
-    inclRows: [["A", { Ir: 1_000_000 }], ["B", { Ir: 800_000 }]],
+    inclRows: [["A", { Ir: 1_000_000 }], ["B", { Ir: 800_000 }], ["C", { Ir: 300_000 }]],
     selfRows: [["A", { Ir: 200_000 }], ["B", { Ir: 500_000 }], ["C", { Ir: 300_000 }]],
   });
-  assert.match(markdown, /\| 1 \| `B` \| 0.5 \| 50.00% \|/);
-  assert.match(markdown, /\| 2 \| `C` \| 0.3 \| 30.00% \|/);
-  assert.match(markdown, /Listed routines: \*\*80.00%\*\*.*Remaining routines: \*\*20.00%\*\*/);
+  assert.match(markdown, /\| # \| Routine \| Self \(Mcycles\) \| % of run \| Self % \|/);
+  assert.match(markdown, /\| 1 \| `A` \| 0.2 \| 100.00% \| 20.00% \|/);
+  assert.match(markdown, /\| 2 \| `B` \| 0.5 \| 80.00% \| 50.00% \|/);
+  assert.match(markdown, /Self cost of listed routines: \*\*70.00%\*\*/);
+  assert.match(markdown, /Self cost of remaining routines: \*\*30.00%\*\*/);
   assert.match(markdown, /\| A \| `\^A\$` \| 1.0 \| 100.00% \| 20.00% \|/);
   assert.match(markdown, /\| B \| `\^B\$` \| 0.8 \| 80.00% \| 50.00% \|/);
-  assert.equal(structured.top_routines[0].incl, 800_000);
-  assert.equal(structured.top_routines[0].self, 500_000);
+  assert.deepEqual(structured.top_routines, [
+    { routine: "A", incl: 1_000_000, self: 200_000 },
+    { routine: "B", incl: 800_000, self: 500_000 },
+  ]);
 });
 
-test("topRoutines ranks by self cost and drops artifacts", () => {
+test("topRoutines ranks by inclusive cost and drops artifacts", () => {
   const rows = parseAnnotate(ANNOTATE).rows;
   const ranked = topRoutines(rows, 10).map(([func]) => func);
   assert.equal(ranked[0], "G4PropagatorInField::ComputeStep(G4FieldTrack&)");
