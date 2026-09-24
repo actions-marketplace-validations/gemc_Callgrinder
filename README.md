@@ -166,11 +166,14 @@ defined your categories. The Action supplies its own Node.js runtime.
 
 ## What the summary reports
 
-- **Category table** — for each category: inclusive `CEst (Mcycles)`, `% of run` (inclusive: entry + callees,
-  overlaps and does not sum to 100%), and `Self %` (cycles executed directly in the entry function(s),
-  non-overlapping).
-- **Top routines** — the hottest individual routines by self cost, with callgrind call counts stripped and
-  unresolved addresses labelled with their object.
+- **Category table** — inclusive cost includes work in the entry routines and their callees. The
+  `Inclusive % (overlapping)` column is not additive: the same work can appear in several categories.
+  `Entry self %` counts only direct work in the matched entries; overlapping patterns can repeat that work.
+- **Top routines** — the hottest individual routines by self cost. `% of run (self)` excludes callees, so
+  these shares sum to at most 100%, apart from rounding. Listed and remaining routine shares appear below
+  the table. Call counts are stripped and unresolved addresses are labelled with their object when available.
+- The clearer labels and function-table parsing fix are **upcoming in the next release**. Existing partial
+  JSON reports must be regenerated with `--from-callgrind`; the application does not need to be profiled again.
 - Cost is CEst (`Ir + 10·L1_misses + 100·LL_misses`), matching qcachegrind's cycle estimation. The report ends
   with a short qcachegrind reading guide.
 

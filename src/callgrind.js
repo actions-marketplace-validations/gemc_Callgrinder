@@ -90,9 +90,19 @@ function parseAnnotate(text) {
 
   const numeric = /^[\d,]+$|^\.$/;
   let total = null;
+  let inFunctionTable = false;
   const rows = [];
   for (const line of text.split("\n")) {
     const tokens = line.trim().split(/\s+/).filter(Boolean);
+    if (tokens[events.length] === "file:function") {
+      inFunctionTable = true;
+      continue;
+    }
+    // Only read the flat function table. Later source annotations contain both direct instruction
+    // costs and inclusive call-site costs; treating those as routines double counts execution.
+    if (inFunctionTable && rows.length > 0 && !numeric.test(tokens[0] || "")) {
+      break;
+    }
     if (tokens.length <= events.length) {
       continue;
     }
@@ -110,10 +120,15 @@ function parseAnnotate(text) {
       total = counts;
       continue;
     }
-    rows.push([locationToFunc(location), counts]);
+    if (inFunctionTable) {
+      rows.push([locationToFunc(location), counts]);
+    }
   }
   if (total === null) {
     throw new Error("no 'PROGRAM TOTALS' row in callgrind_annotate output");
+  }
+  if (!inFunctionTable) {
+    throw new Error("no 'file:function' table in callgrind_annotate output");
   }
   return { total, rows };
 }
@@ -121,10 +136,13 @@ function parseAnnotate(text) {
 // Run callgrind_annotate and return its stdout. inclusive=true adds callee costs to each function
 // (category totals); inclusive=false gives self cost only (hottest individual routines).
 function annotate(file, { inclusive = true } = {}) {
-  const args = ["--threshold=100", file];
-  if (inclusive) {
-    args.unshift("--inclusive=yes");
-  }
+  const args = [
+    `--inclusive=${inclusive ? "yes" : "no"}`,
+    "--auto=no",
+    "--tree=none",
+    "--threshold=100",
+    file,
+  ];
   const result = spawnSync("callgrind_annotate", args, {
     encoding: "utf8",
     maxBuffer: 512 * 1024 * 1024,
