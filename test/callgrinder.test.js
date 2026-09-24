@@ -69,20 +69,23 @@ test("category table reports inclusive and self costs from the two passes", () =
   assert.ok(rows.some((r) => r.label === "Digitization: GFluxDigitization"));
 });
 
-test("self cost is not double counted when a symbol appears in several objects", () => {
-  // The same demangled symbol lives in two objects, so it appears in two inclusive rows (distinct
-  // functions, so their inclusive costs sum) but its self cost must be counted only once.
+test("a symbol in several objects stays bounded: inclusive is max, self is summed", () => {
+  // The same demangled symbol lives in two objects (a COMDAT template copy / per-plugin
+  // instantiation), so it appears in two rows. Their inclusive subtrees overlap, so the per-symbol
+  // inclusive is the dominant copy (max), never the sum (which would exceed 100%). Self instructions
+  // are disjoint, so self is summed.
   const incl = [
-    ["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 60_000_000 }],
-    ["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 40_000_000 }],
+    ["Dispatch::run()", { Ir: 850_000_000 }],
+    ["Dispatch::run()", { Ir: 800_000_000 }],
   ];
-  const self = [["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 30_000_000 }]];
-  const config = loadConfig(
-    JSON.stringify({ categories: [{ label: "Hit collection", match: "GSensitiveDetector::ProcessHits" }] }),
-  );
+  const self = [
+    ["Dispatch::run()", { Ir: 200_000_000 }],
+    ["Dispatch::run()", { Ir: 150_000_000 }],
+  ];
+  const config = loadConfig(JSON.stringify({ categories: [{ label: "Dispatch", match: "Dispatch::run" }] }));
   const [row] = collectRows(config, incl, self);
-  assert.equal(row.incl, 100_000_000);
-  assert.equal(row.self, 30_000_000);
+  assert.equal(row.incl, 850_000_000); // max, not the 1.65e9 sum
+  assert.equal(row.self, 350_000_000); // sum of disjoint self costs
   assert.ok(row.self <= row.incl);
 });
 

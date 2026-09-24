@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { cest, isNamedRoutine } = require("./callgrind");
-const { collectRows } = require("./categories");
+const { collectRows, inclByName, selfByName } = require("./categories");
 const { ensureDirectory, walkJsonFiles } = require("./utils");
 
 const mcycles = (value) =>
@@ -16,16 +16,10 @@ function shorten(name, width = 90) {
   return escaped.length <= width ? escaped : `${escaped.slice(0, width - 1)}…`;
 }
 
-// Ranked non-overlapping self-cost routines. Self costs are aggregated by name, so a symbol that
-// appears in several objects (e.g. a per-detector plugin) is one row with its combined self cost.
+// Ranked non-overlapping self-cost routines. Self costs are aggregated by name (summed), so a symbol
+// that appears in several objects (e.g. a per-detector plugin) is one row with its combined self cost.
 function topRoutines(selfRows, count) {
-  const byFunc = new Map();
-  for (const [func, counts] of selfRows) {
-    if (!isNamedRoutine(func)) {
-      continue;
-    }
-    byFunc.set(func, (byFunc.get(func) || 0) + cest(counts));
-  }
+  const byFunc = selfByName(selfRows.filter(([func]) => isNamedRoutine(func)));
   return [...byFunc.entries()].sort((a, b) => b[1] - a[1]).slice(0, count);
 }
 
@@ -34,18 +28,16 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
   const totalCest = cest(inclTotal);
   const rows = collectRows(config, inclRows, selfRows);
   const routines = topRoutines(selfRows, config.top_routines || 10);
-  // Inclusive cost per routine (summed by name, like the self side), so the routines table can show
-  // % of run (inclusive) next to Self %.
-  const inclByFunc = new Map();
-  for (const [func, counts] of inclRows) {
-    inclByFunc.set(func, (inclByFunc.get(func) || 0) + cest(counts));
-  }
+  // Inclusive cost per routine (max per name; see inclByName), so the routines table can show its
+  // % of run (inclusive) next to Self % without the dominant-subtree cost exceeding 100%.
+  const inclByFunc = inclByName(inclRows);
 
   const lines = [`### ${title}`, ""];
   lines.push(
     `Program totals: **${mcycles(totalCest)} Mcycles** (CEst), ${mcycles(inclTotal.Ir || 0)} Minstr (Ir). ` +
-      "**% of run** is inclusive (self + callees) and overlaps between categories, so it does not sum to " +
-      "100%; **Self %** is the cycles executed directly in the entry function(s), which is non-overlapping.",
+      "**Self %** is the cycles executed directly in the routine (Self Mcycles / total), non-overlapping " +
+      "and the reliable share. **% of run** is inclusive (self + callees); subtrees overlap, so it may " +
+      "sum past 100% across rows, but no single row exceeds 100%.",
   );
   lines.push("");
   lines.push("| Category | Entry symbol(s) | CEst (Mcycles) | % of run | Self % |");
