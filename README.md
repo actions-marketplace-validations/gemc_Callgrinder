@@ -169,11 +169,12 @@ defined your categories. The Action supplies its own Node.js runtime.
 - **Category table** — inclusive cost includes work in the entry routines and their callees. The
   `Inclusive % (overlapping)` column is not additive: the same work can appear in several categories.
   `Entry self %` counts only direct work in the matched entries; overlapping patterns can repeat that work.
-- **Top routines** — ranked by inclusive `% of run`, largest first, with that column before `Self %`.
+- **Top routines** — select the routines with the highest `Self %`, then order those routines by inclusive
+  `% of run`, largest first, with that column before `Self %`. This selection rule is
+  **upcoming in the next release**.
   Inclusive shares include callees and overlap; only self shares sum to at most 100%, apart from rounding.
   Listed and remaining self-cost shares appear below the table. Call counts are stripped and unresolved
-  addresses are labelled with their object when available. Inclusive ranking is
-  **upcoming in the next release**.
+  addresses are labelled with their object when available.
 - The function-table parsing fix shipped in v1.0.6. Regenerate older partial JSON reports with
   `--from-callgrind`; the application does not need to be profiled again.
 - Cost is CEst (`Ir + 10·L1_misses + 100·LL_misses`), matching qcachegrind's cycle estimation. The report ends
