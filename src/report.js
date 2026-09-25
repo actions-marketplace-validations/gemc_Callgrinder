@@ -16,10 +16,9 @@ function shorten(name, width = 90) {
   return escaped.length <= width ? escaped : `${escaped.slice(0, width - 1)}…`;
 }
 
-// Rank all routines by inclusive cost before selecting the top N. Repeated names use the same
-// dominant-subtree aggregation as the category table.
-function topRoutines(inclRows, count) {
-  const byFunc = inclByName(inclRows.filter(([func]) => isNamedRoutine(func)));
+// Select the top N routines by direct work, summing self costs across repeated names.
+function topRoutines(selfRows, count) {
+  const byFunc = selfByName(selfRows.filter(([func]) => isNamedRoutine(func)));
   return [...byFunc.entries()].sort((a, b) => b[1] - a[1]).slice(0, count);
 }
 
@@ -27,7 +26,10 @@ function topRoutines(inclRows, count) {
 function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
   const totalCest = cest(inclTotal);
   const rows = collectRows(config, inclRows, selfRows);
-  const routines = topRoutines(inclRows, config.top_routines || 10);
+  const inclByFunc = inclByName(inclRows);
+  const routines = topRoutines(selfRows, config.top_routines || 10)
+    .map(([func, self]) => [func, inclByFunc.get(func) ?? self])
+    .sort((a, b) => b[1] - a[1]);
   const selfByFunc = selfByName(selfRows);
 
   const lines = [`### ${title}`, ""];
@@ -51,9 +53,10 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
     );
   }
   lines.push("");
-  lines.push(`### Top ${routines.length} routines by inclusive cost (CEst)`, "");
+  lines.push(`### Top ${routines.length} routines by self cost, ordered by inclusive cost (CEst)`, "");
   lines.push(
-    "Ranked by **% of run**, largest first (inclusive: routine + callees). " +
+    "Selected by highest **Self %**, then ordered by **% of run**, largest first " +
+      "(inclusive: routine + callees). " +
       "Inclusive shares overlap and must not be added. **Self %** counts only cycles executed " +
       "directly in each routine; those shares sum to at most 100% (apart from rounding).",
   );
