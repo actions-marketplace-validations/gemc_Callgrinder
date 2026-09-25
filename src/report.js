@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { cest, isNamedRoutine } = require("./callgrind");
-const { collectRows } = require("./categories");
+const { collectRows, inclByName, selfByName } = require("./categories");
 const { ensureDirectory, walkJsonFiles } = require("./utils");
 
 const mcycles = (value) =>
@@ -16,16 +16,10 @@ function shorten(name, width = 90) {
   return escaped.length <= width ? escaped : `${escaped.slice(0, width - 1)}…`;
 }
 
-// Ranked non-overlapping self-cost routines. Self costs are aggregated by name, so a symbol that
-// appears in several objects (e.g. a per-detector plugin) is one row with its combined self cost.
-function topRoutines(selfRows, count) {
-  const byFunc = new Map();
-  for (const [func, counts] of selfRows) {
-    if (!isNamedRoutine(func)) {
-      continue;
-    }
-    byFunc.set(func, (byFunc.get(func) || 0) + cest(counts));
-  }
+// Rank all routines by inclusive cost before selecting the top N. Repeated names use the same
+// dominant-subtree aggregation as the category table.
+function topRoutines(inclRows, count) {
+  const byFunc = inclByName(inclRows.filter(([func]) => isNamedRoutine(func)));
   return [...byFunc.entries()].sort((a, b) => b[1] - a[1]).slice(0, count);
 }
 
@@ -33,23 +27,23 @@ function topRoutines(selfRows, count) {
 function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
   const totalCest = cest(inclTotal);
   const rows = collectRows(config, inclRows, selfRows);
-  const routines = topRoutines(selfRows, config.top_routines || 10);
-  // Inclusive cost per routine (summed by name, like the self side), so the routines table can show
-  // % of run (inclusive) next to Self %.
-  const inclByFunc = new Map();
-  for (const [func, counts] of inclRows) {
-    inclByFunc.set(func, (inclByFunc.get(func) || 0) + cest(counts));
-  }
+  const routines = topRoutines(inclRows, config.top_routines || 10);
+  const selfByFunc = selfByName(selfRows);
 
   const lines = [`### ${title}`, ""];
   lines.push(
     `Program totals: **${mcycles(totalCest)} Mcycles** (CEst), ${mcycles(inclTotal.Ir || 0)} Minstr (Ir). ` +
-      "**% of run** is inclusive (self + callees) and overlaps between categories, so it does not sum to " +
-      "100%; **Self %** is the cycles executed directly in the entry function(s), which is non-overlapping.",
+      "Percentages describe estimated CPU cycles, not elapsed time.",
   );
   lines.push("");
-  lines.push("| Category | Entry symbol(s) | CEst (Mcycles) | % of run | Self % |");
-  lines.push("|----------|-----------------|---------------:|---------:|-------:|");
+  lines.push(
+    "Category **Inclusive %** includes callees, so the same work can appear in several rows. " +
+      "These rows are not a partition of the run and must not be added. **Entry self %** counts only " +
+      "work directly in the matched entry routines; category patterns can also overlap.",
+    "",
+  );
+  lines.push("| Category | Entry symbol(s) | Inclusive (Mcycles) | Inclusive % (overlapping) | Entry self % |");
+  lines.push("|----------|-----------------|--------------------:|--------------------------:|-------------:|");
   for (const row of rows) {
     lines.push(
       `| ${row.label} | \`${row.symbol}\` | ${mcycles(row.incl)} | ` +
@@ -57,27 +51,37 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
     );
   }
   lines.push("");
-  lines.push(`### Top ${routines.length} routines by self time (CEst)`, "");
-  lines.push("Ranked by **Self %** (cycles executed directly in the routine); **% of run** is inclusive.");
+  lines.push(`### Top ${routines.length} routines by inclusive cost (CEst)`, "");
+  lines.push(
+    "Ranked by **% of run**, largest first (inclusive: routine + callees). " +
+      "Inclusive shares overlap and must not be added. **Self %** counts only cycles executed " +
+      "directly in each routine; those shares sum to at most 100% (apart from rounding).",
+  );
   lines.push("");
-  lines.push("| # | Routine | Self (Mcycles) | Self % | % of run |");
-  lines.push("|---|---------|---------------:|-------:|---------:|");
-  routines.forEach(([func, value], index) => {
-    const incl = inclByFunc.has(func) ? inclByFunc.get(func) : value;
+  lines.push("| # | Routine | Self (Mcycles) | % of run | Self % |");
+  lines.push("|---|---------|---------------:|---------:|-------:|");
+  routines.forEach(([func, incl], index) => {
+    const self = selfByFunc.get(func) || 0;
     lines.push(
-      `| ${index + 1} | \`${shorten(func)}\` | ${mcycles(value)} | ` +
-        `${percent(value, totalCest)}% | ${percent(incl, totalCest)}% |`,
+      `| ${index + 1} | \`${shorten(func)}\` | ${mcycles(self)} | ` +
+        `${percent(incl, totalCest)}% | ${percent(self, totalCest)}% |`,
     );
   });
   lines.push("");
+  const listedCost = routines.reduce((sum, [func]) => sum + (selfByFunc.get(func) || 0), 0);
+  lines.push(
+    `Self cost of listed routines: **${percent(listedCost, totalCest)}%** of the run. ` +
+      `Self cost of remaining routines: **${percent(totalCest - listedCost, totalCest)}%**.`,
+    "",
+  );
 
   const structured = {
     total: { cest: totalCest, ir: inclTotal.Ir || 0 },
     categories: rows,
-    top_routines: routines.map(([routine, value]) => ({
+    top_routines: routines.map(([routine, incl]) => ({
       routine,
-      self: value,
-      incl: inclByFunc.has(routine) ? inclByFunc.get(routine) : value,
+      self: selfByFunc.get(routine) || 0,
+      incl,
     })),
   };
   return { markdown: lines.join("\n"), structured };

@@ -1,57 +1,70 @@
 # Callgrinder
 
-Callgrinder profiles a command with [Valgrind](https://valgrind.org)'s **callgrind** tool and reports where the
-time goes: a per-category table (with both inclusive and self cost) and a table of the hottest individual
-routines, as **CEst** (cycle estimation). It runs three ways — a GitHub Action, a reusable workflow for
-distributed fan-out, and a local `./callgrinder` command — and, like [ThreadScale][threadscale], it is a
-zero-dependency Node.js 24 project.
+Callgrinder shows which functions cost the most in your C/C++ application. Give it a command and it runs
+[Valgrind](https://valgrind.org)'s **callgrind** profiler, then prints the hottest routines. An optional JSON
+config groups functions into categories you care about.
+
+Use it locally with `./callgrinder` or in GitHub Actions with `gemc/Callgrinder@v1`. Costs are estimated CPU
+cycles (**CEst**), not elapsed seconds. To measure how runtime changes with thread count, use
+[ThreadScale][threadscale].
 
 [threadscale]: https://github.com/gemc/ThreadScale
 
-It is application-independent: the categories you care about are supplied as a small JSON config, so the same
-Action profiles any C/C++ program compiled with debug symbols.
+## Prerequisites
 
-<br/>
+- Linux, including a Linux VM or container on macOS or Windows.
+- Node.js 24+, Git, and Valgrind (including `callgrind_annotate`).
+- Your application compiled in **debug mode**, with debug symbols (`-g`; CMake: `-DCMAKE_BUILD_TYPE=Debug`).
 
-## Requirements
+Callgrinder itself has no npm dependencies or build step.
 
-- A Linux runner (or container) with **`valgrind`** installed (it provides `callgrind_annotate`).
-- **Node.js 24+**.
-- Your application built **with debug symbols** — otherwise hot routines appear as unresolved `0x…` addresses.
+## Quickstart: profile your application
 
-Callgrinder does not build or prepare your app; the caller does that (build, generate inputs, set the working
-directory) and passes a ready-to-run command, exactly like ThreadScale.
-
-<br/>
-
-## Quick start (Action)
-
-```yaml
-- uses: gemc/Callgrinder@v1
-  with:
-    command: 'build/bin/myapp input.dat -n {events}'
-    name: my-workload
-    events: '100'
-    config: ci/callgrinder.json
-    working-directory: .
-```
-
-The step profiles the command, writes `callgrind.out.my-workload`, and appends the category and top-routines
-tables to the Job Summary.
-
-<br/>
-
-## Local command-line runs
+Compile your software in debug mode and check that your executable runs normally with its input files.
+Then clone Callgrinder and pass it that same command:
 
 ```shell
-./callgrinder 'build/bin/myapp input.dat -n {events}' --name my-workload --events 100 --config ci/callgrinder.json
+git clone https://github.com/gemc/Callgrinder.git
+cd Callgrinder
+
+./callgrinder './build/bin/myapp input.dat' \
+  --working-directory /path/to/your/project \
+  --name my-workload --output-dir profile-results
 ```
+
+Replace `/path/to/your/project` with your application's directory and `./build/bin/myapp input.dat` with your
+executable and its arguments. The executable and input paths are relative to `--working-directory`. Start with
+a small workload because profiling is much slower than a normal run.
+
+The terminal prints the **Top routines** table. Category rows are empty until you supply a
+[category config](#the-category-config). Results are saved under the Callgrinder checkout:
+
+- `profile-results/callgrind.out.my-workload`: the raw profile for QCachegrind or KCachegrind.
+- `profile-results/profile-my-workload.json`: the parsed results used to generate a report.
+
+Save the summary as Markdown and export the category table as CSV:
+
+```shell
+./callgrinder report --input-dir profile-results --output-dir profile-report
+cat profile-report/summary.md
+```
+
+This creates `summary.md`, `categories.csv`, and `callgrinder.json` in `profile-report/`. The CSV contains
+category rows once you add a config.
+
+Always pass `--output-dir` when running from the checkout: the default `callgrinder` directory name conflicts
+with the `callgrinder` launcher file. Choose a different directory or profile name to keep earlier runs.
+
+<br/>
+
+## Command options
 
 The command may contain `{events}`, `{name}`, and `{run}` placeholders. Quote the whole command as one
 argument, and quote inner arguments that contain spaces:
 
 ```shell
-./callgrinder 'gemc card.yaml -n {events} -gsystem="[{name: det, factory: ascii}]"' --name det --events 100
+./callgrinder 'gemc card.yaml -n {events} -gsystem="[{name: det, factory: ascii}]"' \
+  --name det --events 100 --output-dir profile-results
 ```
 
 Callgrinder runs the command as `valgrind --tool=callgrind … bash -c "exec <command>"`, so `exec` makes the
@@ -61,16 +74,26 @@ If you would rather run `valgrind` yourself — for example to pass complex, spa
 shell array with no re-quoting — hand Callgrinder the resulting file and it only summarizes:
 
 ```shell
-callgrinder --from-callgrind callgrind.out.my-workload --name my-workload --config ci/callgrinder.json
+./callgrinder --from-callgrind profile-results/callgrind.out.my-workload \
+  --name my-workload --output-dir profile-results
 ```
 
 <br/>
 
 ## The category config
 
-Categories are JSON (native and zero-dependency, and it quotes regex backslashes cleanly). Each category is
-either **fixed** (`match` names one entry symbol) or **discovered** (`discover` captures a class in group 1 and
-reports one row per class found — e.g. every plugin of a kind):
+Categories are optional. Save your category definitions as `ci/callgrinder.json` and pass
+`--config ci/callgrinder.json`. Config paths are relative to the directory where you invoke Callgrinder.
+You can add categories to an existing profile without rerunning your application:
+
+```shell
+./callgrinder --from-callgrind profile-results/callgrind.out.my-workload --name my-workload \
+  --config /path/to/your/project/ci/callgrinder.json --output-dir profile-results
+./callgrinder report --input-dir profile-results --output-dir profile-report
+```
+
+Each category is either **fixed** (`match` names one entry symbol) or **discovered** (`discover` captures a
+class in group 1 and reports one row per class found — e.g. every plugin of a kind):
 
 ```json
 {
@@ -88,17 +111,71 @@ reports one row per class found — e.g. every plugin of a kind):
 - `discover` — a regex whose group 1 captures a class; every matching class becomes its own row, labelled
   `"<family>: <class>"`. Add `"method": "…"` to control the displayed symbol when `discover` uses alternation.
 
-`config` accepts a file path or inline JSON. See `examples/gemc3.json` and `examples/gemc2.json`.
+`config` accepts a file path or inline JSON. See [GEMC3](examples/gemc3.json) and [GEMC2](examples/gemc2.json)
+for application-specific examples.
+
+<br/>
+
+## Try it in GitHub Actions
+
+Use a Linux runner with Valgrind already available. This example uses a self-hosted runner and a CMake
+application; CMake and your compiler must also be available. Save it as `.github/workflows/profile.yml`,
+replace the build commands with your project's debug build, and set `command` to your executable and inputs:
+
+```yaml
+name: Profile
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build your application in debug mode
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel
+      - uses: gemc/Callgrinder@v1
+        with:
+          command: ./build/bin/myapp input.dat
+          name: my-workload
+          output-dir: profile-results
+      - uses: gemc/Callgrinder@v1
+        with:
+          mode: report
+          input-dir: profile-results
+          output-dir: profile-report
+      - uses: actions/upload-artifact@v7
+        with:
+          name: profile
+          path: |
+            profile-results/
+            profile-report/
+```
+
+Once the workflow is on your default branch, open **Actions → Profile → Run workflow**. Read the tables in
+the run summary and download the **profile** artifact for the raw profile and report files. Prepare any input
+files your application needs before the Callgrinder step. Add `config: ci/callgrinder.json` when you have
+defined your categories. The Action supplies its own Node.js runtime.
 
 <br/>
 
 ## What the summary reports
 
-- **Category table** — for each category: inclusive `CEst (Mcycles)`, `% of run` (inclusive: entry + callees,
-  overlaps and does not sum to 100%), and `Self %` (cycles executed directly in the entry function(s),
-  non-overlapping).
-- **Top routines** — the hottest individual routines by self cost, with callgrind call counts stripped and
-  unresolved addresses labelled with their object.
+- **Category table** — inclusive cost includes work in the entry routines and their callees. The
+  `Inclusive % (overlapping)` column is not additive: the same work can appear in several categories.
+  `Entry self %` counts only direct work in the matched entries; overlapping patterns can repeat that work.
+- **Top routines** — ranked by inclusive `% of run`, largest first, with that column before `Self %`.
+  Inclusive shares include callees and overlap; only self shares sum to at most 100%, apart from rounding.
+  Listed and remaining self-cost shares appear below the table. Call counts are stripped and unresolved
+  addresses are labelled with their object when available. Inclusive ranking is
+  **upcoming in the next release**.
+- The function-table parsing fix shipped in v1.0.6. Regenerate older partial JSON reports with
+  `--from-callgrind`; the application does not need to be profiled again.
 - Cost is CEst (`Ir + 10·L1_misses + 100·LL_misses`), matching qcachegrind's cycle estimation. The report ends
   with a short qcachegrind reading guide.
 

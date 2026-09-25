@@ -14,6 +14,8 @@ const ANNOTATE = `Events shown:     Ir I1mr D1mr D1mw ILmr DLmr DLmw
 --------------------------------------------------------------------------------
 1,000,000,000 (100.0%)  0  0  0  0  0  0  PROGRAM TOTALS
 --------------------------------------------------------------------------------
+Ir I1mr D1mr D1mw ILmr DLmr DLmw file:function
+--------------------------------------------------------------------------------
   400,000,000 (40.0%)  0  0  0  0  0  0  /o/G4PropagatorInField.cc:G4PropagatorInField::ComputeStep(G4FieldTrack&)
   120,000,000 (12.0%)  0  0  0  0  0  0  /o/gfield.cc:GField_AsciiMapFactory::GetFieldValue(double const*, double*) const (5,539,090x)
    80,000,000 (8.0%)  0  0  0  0  0  0  /o/flux.cc:GFluxDigitization::digitizeHit(GHit*, unsigned long) [/o/flux.gplugin]
@@ -45,6 +47,34 @@ test("parseAnnotate tolerates percentages and finds totals + rows", () => {
   assert.ok(funcs.some((f) => f.startsWith("0x0000000009fe6140")));
 });
 
+test("source annotations and inclusive call-site costs never become self-cost routines", () => {
+  const source = `
+--------------------------------------------------------------------------------
+-- Auto-annotated source: /o/run.cc
+--------------------------------------------------------------------------------
+Ir I1mr D1mr D1mw ILmr DLmr DLmw
+  900,000,000 0 0 0 0 0 0 => ???:0x0000000004110690 (1x)
+  900,000,000 0 0 0 0 0 0 => ???:0x000000000a05b040 (1x)
+   80,000,000 0 0 0 0 0 0 => /o/flux.cc:GFluxDigitization::digitizeHit(GHit*, unsigned long) (1x)
+   10,000,000 0 0 0 0 0 0 42 return work();
+  990,000,000 0 0 0 0 0 0 events annotated
+`;
+  const { total, rows } = parseAnnotate(ANNOTATE + source);
+  assert.deepEqual(rows, parseAnnotate(ANNOTATE).rows);
+  const ranked = topRoutines(rows, 10);
+  assert.ok(ranked.reduce((sum, [, value]) => sum + value, 0) <= cest(total));
+  assert.ok(!ranked.some(([func]) => func.includes("0x0000000004110690")));
+  // A real unresolved routine in the flat table must still be retained.
+  assert.ok(ranked.some(([func]) => func.includes("0x0000000009fe6140")));
+});
+
+test("missing function-table headers produce a diagnostic instead of guessing at rows", () => {
+  assert.throws(
+    () => parseAnnotate(ANNOTATE.replace("Ir I1mr D1mr D1mw ILmr DLmr DLmw file:function", "")),
+    /no 'file:function' table/,
+  );
+});
+
 test("category table reports inclusive and self costs from the two passes", () => {
   const incl = parseAnnotate(ANNOTATE).rows;
   const self = [
@@ -69,20 +99,23 @@ test("category table reports inclusive and self costs from the two passes", () =
   assert.ok(rows.some((r) => r.label === "Digitization: GFluxDigitization"));
 });
 
-test("self cost is not double counted when a symbol appears in several objects", () => {
-  // The same demangled symbol lives in two objects, so it appears in two inclusive rows (distinct
-  // functions, so their inclusive costs sum) but its self cost must be counted only once.
+test("a symbol in several objects stays bounded: inclusive is max, self is summed", () => {
+  // The same demangled symbol lives in two objects (a COMDAT template copy / per-plugin
+  // instantiation), so it appears in two rows. Their inclusive subtrees overlap, so the per-symbol
+  // inclusive is the dominant copy (max), never the sum (which would exceed 100%). Self instructions
+  // are disjoint, so self is summed.
   const incl = [
-    ["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 60_000_000 }],
-    ["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 40_000_000 }],
+    ["Dispatch::run()", { Ir: 850_000_000 }],
+    ["Dispatch::run()", { Ir: 800_000_000 }],
   ];
-  const self = [["GSensitiveDetector::ProcessHits(G4Step*)", { Ir: 30_000_000 }]];
-  const config = loadConfig(
-    JSON.stringify({ categories: [{ label: "Hit collection", match: "GSensitiveDetector::ProcessHits" }] }),
-  );
+  const self = [
+    ["Dispatch::run()", { Ir: 200_000_000 }],
+    ["Dispatch::run()", { Ir: 150_000_000 }],
+  ];
+  const config = loadConfig(JSON.stringify({ categories: [{ label: "Dispatch", match: "Dispatch::run" }] }));
   const [row] = collectRows(config, incl, self);
-  assert.equal(row.incl, 100_000_000);
-  assert.equal(row.self, 30_000_000);
+  assert.equal(row.incl, 850_000_000); // max, not the 1.65e9 sum
+  assert.equal(row.self, 350_000_000); // sum of disjoint self costs
   assert.ok(row.self <= row.incl);
 });
 
@@ -90,12 +123,37 @@ test("renderProfile emits both tables and excludes the artifact routine", () => 
   const { total, rows } = parseAnnotate(ANNOTATE);
   const config = loadConfig(JSON.stringify({ categories: [{ family: "F", discover: "(GField_\\w+)::GetFieldValue" }] }));
   const { markdown } = renderProfile({ title: "t", config, inclTotal: total, inclRows: rows, selfRows: rows });
-  assert.match(markdown, /\| Category \| Entry symbol\(s\) \| CEst \(Mcycles\) \| % of run \| Self % \|/);
-  assert.match(markdown, /Top \d+ routines by self time/);
+  assert.match(markdown, /\| Inclusive \(Mcycles\) \| Inclusive % \(overlapping\) \| Entry self % \|/);
+  assert.match(markdown, /Top \d+ routines by inclusive cost/);
   assert.doesNotMatch(markdown, /events annotated/);
 });
 
-test("topRoutines ranks by self cost and drops artifacts", () => {
+test("top routines are selected by inclusive share with that column before self share", () => {
+  const config = loadConfig(JSON.stringify({
+    top_routines: 2,
+    categories: [{ label: "A", match: "^A$" }, { label: "B", match: "^B$" }],
+  }));
+  const { markdown, structured } = renderProfile({
+    title: "Overlapping calls",
+    config,
+    inclTotal: { Ir: 1_000_000 },
+    inclRows: [["A", { Ir: 1_000_000 }], ["B", { Ir: 800_000 }], ["C", { Ir: 300_000 }]],
+    selfRows: [["A", { Ir: 200_000 }], ["B", { Ir: 500_000 }], ["C", { Ir: 300_000 }]],
+  });
+  assert.match(markdown, /\| # \| Routine \| Self \(Mcycles\) \| % of run \| Self % \|/);
+  assert.match(markdown, /\| 1 \| `A` \| 0.2 \| 100.00% \| 20.00% \|/);
+  assert.match(markdown, /\| 2 \| `B` \| 0.5 \| 80.00% \| 50.00% \|/);
+  assert.match(markdown, /Self cost of listed routines: \*\*70.00%\*\*/);
+  assert.match(markdown, /Self cost of remaining routines: \*\*30.00%\*\*/);
+  assert.match(markdown, /\| A \| `\^A\$` \| 1.0 \| 100.00% \| 20.00% \|/);
+  assert.match(markdown, /\| B \| `\^B\$` \| 0.8 \| 80.00% \| 50.00% \|/);
+  assert.deepEqual(structured.top_routines, [
+    { routine: "A", incl: 1_000_000, self: 200_000 },
+    { routine: "B", incl: 800_000, self: 500_000 },
+  ]);
+});
+
+test("topRoutines ranks by inclusive cost and drops artifacts", () => {
   const rows = parseAnnotate(ANNOTATE).rows;
   const ranked = topRoutines(rows, 10).map(([func]) => func);
   assert.equal(ranked[0], "G4PropagatorInField::ComputeStep(G4FieldTrack&)");
