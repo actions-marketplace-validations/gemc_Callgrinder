@@ -85,6 +85,9 @@ jobs:
           const workload = profile.categories.find((row) => row.label === 'Test workload');
           assert.ok(workload && workload.self > 0, 'The target main function must be profiled');
           assert.ok(profile.top_routines.some((row) => row.routine === 'main' && row.self > 0));
+          const main = profile.top_routines.find((row) => row.routine === 'main');
+          assert.equal(main.source, 'smoke.c');
+          assert.ok(main.calls > 0, 'The raw profile must supply incoming calls to main');
           assert.match(read('CALLGRIND_FILE'), /events:.*Ir/);
           assert.deepEqual(JSON.parse(read('REPORT_FILE')), [profile]);
           assert.match(read('SUMMARY_FILE'), /Test workload/);

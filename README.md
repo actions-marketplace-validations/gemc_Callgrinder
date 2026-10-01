@@ -173,8 +173,13 @@ defined your categories. The Action supplies its own Node.js runtime.
   `% of run`, largest first, with that column before `Self %`. This selection rule is
   **upcoming in the next release**.
   Inclusive shares include callees and overlap; only self shares sum to at most 100%, apart from rounding.
-  Listed and remaining self-cost shares appear below the table. Call counts are stripped and unresolved
-  addresses are labelled with their object when available.
+  Listed and remaining self-cost shares appear below the table. **Source / package** shows the source
+  filename, or the binary/library name when source information is unavailable. **Calls** shows recorded
+  incoming calls, summed across callers and object copies, including recursion; it is zero for routines
+  with no recorded incoming calls. Missing information appears as `—`. These two columns are
+  **upcoming in the next release** and are also included as `source` and `calls` in JSON results.
+  Unresolved addresses are labelled with their object when available. Regenerate existing partial JSON
+  reports with `--from-callgrind` to populate the new columns.
 - The function-table parsing fix shipped in v1.0.6. Regenerate older partial JSON reports with
   `--from-callgrind`; the application does not need to be profiled again.
 - Cost is CEst (`Ir + 10·L1_misses + 100·LL_misses`), matching qcachegrind's cycle estimation. The report ends

@@ -27,7 +27,7 @@ function cest(counts) {
 // Reduce a callgrind "file:function (Nx) [object]" location to a readable routine name. Trailing
 // [object] and the call-count (12,345x) suffix are removed, and an unresolved bare address is
 // labelled with its object instead of a bare hex.
-function locationToFunc(location) {
+function parseLocation(location) {
   let object = null;
   let previous = null;
   while (previous !== location) {
@@ -45,6 +45,7 @@ function locationToFunc(location) {
   // The location is 'file:function'. File paths carry no '::', while the function may, so the
   // separator is the first ':' that is not part of a '::' token.
   let func = location;
+  let file = null;
   for (let index = 0; index < location.length; index += 1) {
     if (location[index] !== ":") {
       continue;
@@ -52,6 +53,7 @@ function locationToFunc(location) {
     const before = index > 0 ? location[index - 1] : "";
     const after = index + 1 < location.length ? location[index + 1] : "";
     if (before !== ":" && after !== ":") {
+      file = location.slice(0, index).trim();
       func = location.slice(index + 1);
       break;
     }
@@ -61,7 +63,67 @@ function locationToFunc(location) {
   if (/^0x[0-9a-fA-F]+$/.test(func)) {
     func = object ? `${func} in ${object.split("/").pop()}` : `${func} (unresolved)`;
   }
-  return func;
+  const known = (value) => value && value !== "???" && value !== "??";
+  const source = known(file) ? file.split("/").pop() : known(object) ? object.split("/").pop() : null;
+  return { func, source };
+}
+
+function locationToFunc(location) {
+  return parseLocation(location).func;
+}
+
+// Sum incoming call arcs, including recursive calls and copies in different objects. Function and
+// object IDs are shared between caller/callee records; an ID can be defined in either kind of record.
+function parseCallCounts(text) {
+  const functions = new Map();
+  const objects = new Map();
+  const calls = new Map();
+  let object = "";
+  let calleeObject = null;
+  let callee = null;
+  const resolve = (value, names) => {
+    const match = value.match(/^\((\d+)\)(?:\s+(.*))?$/);
+    if (!match) {
+      return value;
+    }
+    if (match[2] !== undefined) {
+      names.set(match[1], match[2]);
+    }
+    if (!names.has(match[1])) {
+      throw new Error(`undefined Callgrind name ID: ${value}`);
+    }
+    return names.get(match[1]);
+  };
+  const name = (func, owner) => locationToFunc(`${func}${owner ? ` [${owner}]` : ""}`);
+  for (const line of text.split("\n")) {
+    const match = line.match(/^(ob|cob|fn|cfn|calls)=(.*)$/);
+    if (!match) {
+      continue;
+    }
+    const [, key, value] = match;
+    if (key === "ob") {
+      object = resolve(value, objects);
+    } else if (key === "cob") {
+      calleeObject = resolve(value, objects);
+    } else if (key === "fn") {
+      const func = name(resolve(value, functions), object);
+      if (!calls.has(func)) {
+        calls.set(func, 0);
+      }
+      callee = null;
+      calleeObject = null;
+    } else if (key === "cfn") {
+      callee = resolve(value, functions);
+    } else if (callee !== null) {
+      const count = value.match(/^\d+/);
+      if (!count) {
+        throw new Error(`invalid Callgrind call count: ${value}`);
+      }
+      const func = name(callee, calleeObject ?? object);
+      calls.set(func, (calls.get(func) || 0) + Number(count[0]));
+    }
+  }
+  return calls;
 }
 
 // Drop callgrind_annotate summary artifacts (e.g. "events annotated") that are not routines.
@@ -72,7 +134,7 @@ function isNamedRoutine(func) {
   return !func.trim().includes(" ");
 }
 
-// Parse callgrind_annotate output into { total, rows: [[func, counts], ...] }.
+// Parse callgrind_annotate output into { total, rows: [[func, counts, { source }], ...] }.
 function parseAnnotate(text) {
   // callgrind_annotate may print a percentage after each count (e.g. "12,345 (6.7%)"); drop those.
   text = text.replace(/\(\s*[\d.]+%\)/g, " ");
@@ -121,7 +183,8 @@ function parseAnnotate(text) {
       continue;
     }
     if (inFunctionTable) {
-      rows.push([locationToFunc(location), counts]);
+      const { func, source } = parseLocation(location);
+      rows.push([func, counts, { source }]);
     }
   }
   if (total === null) {
@@ -195,5 +258,6 @@ module.exports = {
   isNamedRoutine,
   locationToFunc,
   parseAnnotate,
+  parseCallCounts,
   runCallgrind,
 };
