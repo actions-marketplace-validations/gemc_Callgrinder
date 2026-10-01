@@ -23,7 +23,7 @@ function topRoutines(selfRows, count) {
 }
 
 // Full markdown section for one profile: category table + top-routines table.
-function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
+function renderProfile({ title, config, inclTotal, inclRows, selfRows, callsByFunc = new Map() }) {
   const totalCest = cest(inclTotal);
   const rows = collectRows(config, inclRows, selfRows);
   const inclByFunc = inclByName(inclRows);
@@ -31,6 +31,16 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
     .map(([func, self]) => [func, inclByFunc.get(func) ?? self])
     .sort((a, b) => b[1] - a[1]);
   const selfByFunc = selfByName(selfRows);
+  const sourcesByFunc = new Map();
+  for (const [func, , metadata] of [...selfRows, ...inclRows]) {
+    if (metadata?.source) {
+      if (!sourcesByFunc.has(func)) {
+        sourcesByFunc.set(func, new Set());
+      }
+      sourcesByFunc.get(func).add(metadata.source);
+    }
+  }
+  const sourceOf = (func) => [...(sourcesByFunc.get(func) || [])].sort().join(", ") || null;
 
   const lines = [`### ${title}`, ""];
   lines.push(
@@ -59,14 +69,19 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
       "(inclusive: routine + callees). " +
       "Inclusive shares overlap and must not be added. **Self %** counts only cycles executed " +
       "directly in each routine; those shares sum to at most 100% (apart from rounding).",
+    "Source / package shows the source filename, falling back to the binary or library name. " +
+      "**Calls** shows recorded incoming calls, including recursion; — means unavailable.",
   );
   lines.push("");
-  lines.push("| # | Routine | Self (Mcycles) | % of run | Self % |");
-  lines.push("|---|---------|---------------:|---------:|-------:|");
+  lines.push("| # | Routine | Source / package | Calls | Self (Mcycles) | % of run | Self % |");
+  lines.push("|---|---------|------------------|------:|---------------:|---------:|-------:|");
   routines.forEach(([func, incl], index) => {
     const self = selfByFunc.get(func) || 0;
+    const source = sourceOf(func);
+    const calls = callsByFunc.get(func);
     lines.push(
-      `| ${index + 1} | \`${shorten(func)}\` | ${mcycles(self)} | ` +
+      `| ${index + 1} | \`${shorten(func)}\` | ${source ? `\`${escapePipes(source)}\`` : "—"} | ` +
+        `${calls === undefined ? "—" : calls.toLocaleString("en-US")} | ${mcycles(self)} | ` +
         `${percent(incl, totalCest)}% | ${percent(self, totalCest)}% |`,
     );
   });
@@ -85,6 +100,8 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows }) {
       routine,
       self: selfByFunc.get(routine) || 0,
       incl,
+      source: sourceOf(routine),
+      calls: callsByFunc.get(routine) ?? null,
     })),
   };
   return { markdown: lines.join("\n"), structured };

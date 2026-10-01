@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { cest, isNamedRoutine, locationToFunc, parseAnnotate } = require("../src/callgrind");
+const { cest, isNamedRoutine, locationToFunc, parseAnnotate, parseCallCounts } = require("../src/callgrind");
 const { collectRows, loadConfig } = require("../src/categories");
 const { renderProfile, topRoutines } = require("../src/report");
 const { summarizeCallgrind } = require("../src/profile");
@@ -45,6 +45,57 @@ test("parseAnnotate tolerates percentages and finds totals + rows", () => {
   const funcs = rows.map(([func]) => func);
   assert.ok(funcs.includes("G4PropagatorInField::ComputeStep(G4FieldTrack&)"));
   assert.ok(funcs.some((f) => f.startsWith("0x0000000009fe6140")));
+  assert.equal(rows[0][2].source, "G4PropagatorInField.cc");
+  assert.equal(rows[2][2].source, "flux.cc");
+  assert.equal(rows.at(-1)[2].source, null);
+});
+
+test("source filenames fall back to the owning object when debug information is missing", () => {
+  const text = ANNOTATE.replace(
+    "/o/flux.cc:GFluxDigitization::digitizeHit(GHit*, unsigned long) [/o/flux.gplugin]",
+    "???:GFluxDigitization::digitizeHit(GHit*, unsigned long) [/o/flux.gplugin]",
+  );
+  assert.equal(parseAnnotate(text).rows[2][2].source, "flux.gplugin");
+});
+
+test("incoming calls sum callers, recursion, and object copies using compressed names", () => {
+  const calls = parseCallCounts(`events: Ir
+ob=(1) /o/gemc
+fn=(1) main
+cob=(2) /o/libG4.so
+cfn=(2) G4Step::run()
+calls=1200 42
+1 2400
+cfn=(2)
+calls=34 42
+2 68
+ob=(2)
+fn=(2)
+cfn=(2)
+calls=6 42
+42 12
+ob=(1)
+fn=(3) other
+cob=(2)
+cfn=(2)
+calls=10 42
+1 20
+fn=(4) neverCalled
+ob=(3) /o/plugin.so
+fn=(2)
+cfn=(2)
+calls=2 42
+42 4
+cob=(2)
+cfn=(5) 0xabc
+calls=7 0
+43 14
+`);
+  assert.equal(calls.get("G4Step::run()"), 1252);
+  assert.equal(calls.get("main"), 0);
+  assert.equal(calls.get("neverCalled"), 0);
+  assert.equal(calls.get("0xabc in libG4.so"), 7);
+  assert.throws(() => parseCallCounts("cfn=(99)"), /undefined Callgrind name ID/);
 });
 
 test("source annotations and inclusive call-site costs never become self-cost routines", () => {
@@ -140,18 +191,68 @@ test("top routines are selected by self cost before ordering by inclusive share"
     inclRows: [["A", { Ir: 1_000_000 }], ["B", { Ir: 800_000 }], ["C", { Ir: 900_000 }]],
     selfRows: [["A", { Ir: 200_000 }], ["B", { Ir: 500_000 }], ["C", { Ir: 300_000 }]],
   });
-  assert.match(markdown, /\| # \| Routine \| Self \(Mcycles\) \| % of run \| Self % \|/);
+  assert.match(
+    markdown,
+    /\| # \| Routine \| Source \/ package \| Calls \| Self \(Mcycles\) \| % of run \| Self % \|/,
+  );
   assert.match(markdown, /Selected by highest \*\*Self %\*\*, then ordered by \*\*% of run\*\*/);
-  assert.match(markdown, /\| 1 \| `C` \| 0.3 \| 90.00% \| 30.00% \|/);
-  assert.match(markdown, /\| 2 \| `B` \| 0.5 \| 80.00% \| 50.00% \|/);
+  assert.match(markdown, /\| 1 \| `C` \| — \| — \| 0.3 \| 90.00% \| 30.00% \|/);
+  assert.match(markdown, /\| 2 \| `B` \| — \| — \| 0.5 \| 80.00% \| 50.00% \|/);
   assert.match(markdown, /Self cost of listed routines: \*\*80.00%\*\*/);
   assert.match(markdown, /Self cost of remaining routines: \*\*20.00%\*\*/);
   assert.match(markdown, /\| A \| `\^A\$` \| 1.0 \| 100.00% \| 20.00% \|/);
   assert.match(markdown, /\| B \| `\^B\$` \| 0.8 \| 80.00% \| 50.00% \|/);
   assert.deepEqual(structured.top_routines, [
-    { routine: "C", incl: 900_000, self: 300_000 },
-    { routine: "B", incl: 800_000, self: 500_000 },
+    { routine: "C", incl: 900_000, self: 300_000, source: null, calls: null },
+    { routine: "B", incl: 800_000, self: 500_000, source: null, calls: null },
   ]);
+});
+
+test("routine metadata combines sources without double-counting the two annotation passes", () => {
+  const rows = [
+    ["Dispatch::run()", { Ir: 10 }, { source: "a.cc" }],
+    ["Dispatch::run()", { Ir: 20 }, { source: "plugin.so" }],
+    ["root", { Ir: 1 }, { source: "main.cc" }],
+  ];
+  const { markdown, structured } = renderProfile({
+    title: "Metadata",
+    config: loadConfig(),
+    inclTotal: { Ir: 31 },
+    inclRows: rows,
+    selfRows: rows,
+    callsByFunc: new Map([["Dispatch::run()", 1234], ["root", 0]]),
+  });
+  assert.match(markdown, /`Dispatch::run\(\)` \| `a.cc, plugin.so` \| 1,234 \|/);
+  assert.match(markdown, /`root` \| `main.cc` \| 0 \|/);
+  assert.equal(structured.top_routines[0].calls, 1234);
+  assert.equal(structured.top_routines[0].source, "a.cc, plugin.so");
+});
+
+test("summarizeCallgrind reads raw call counts into Markdown and JSON", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "callgrinder-counts-"));
+  const file = path.join(dir, "callgrind.out.x");
+  fs.writeFileSync(file, `events: Ir
+ob=/o/gemc
+fn=main
+cfn=GField_AsciiMapFactory::GetFieldValue(double const*, double*) const
+calls=5539090 1
+1 120000000
+`);
+  const executable = path.join(dir, "callgrind_annotate");
+  fs.writeFileSync(executable, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(ANNOTATE)});\n`);
+  fs.chmodSync(executable, 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}${path.delimiter}${originalPath}`;
+  t.after(() => {
+    process.env.PATH = originalPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const result = summarizeCallgrind({ name: "counts", callgrindFile: file, outputDirectory: dir });
+  assert.match(result.markdown, /`gfield.cc` \| 5,539,090 \|/);
+  const partial = JSON.parse(fs.readFileSync(result.partialFile, "utf8"));
+  const field = partial.top_routines.find((row) => row.routine.startsWith("GField_"));
+  assert.equal(field.source, "gfield.cc");
+  assert.equal(field.calls, 5539090);
 });
 
 test("topRoutines selects by self cost and drops artifacts", () => {
