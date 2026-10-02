@@ -70,19 +70,19 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows, callsByFu
       "Inclusive shares overlap and must not be added. **Self %** counts only cycles executed " +
       "directly in each routine; those shares sum to at most 100% (apart from rounding).",
     "Source / package shows the source filename, falling back to the binary or library name. " +
-      "**Calls** shows recorded incoming calls, including recursion; — means unavailable.",
+      "**Calls** shows recorded incoming calls, including recursion; — means not recorded.",
   );
   lines.push("");
-  lines.push("| # | Routine | Source / package | Calls | Self (Mcycles) | % of run | Self % |");
-  lines.push("|---|---------|------------------|------:|---------------:|---------:|-------:|");
+  lines.push("| # | Source / package | Routine | Self (Mcycles) | % of run | Self % | Calls |");
+  lines.push("|---|------------------|---------|---------------:|---------:|-------:|------:|");
   routines.forEach(([func, incl], index) => {
     const self = selfByFunc.get(func) || 0;
     const source = sourceOf(func);
     const calls = callsByFunc.get(func);
     lines.push(
-      `| ${index + 1} | \`${shorten(func)}\` | ${source ? `\`${escapePipes(source)}\`` : "—"} | ` +
-        `${calls === undefined ? "—" : calls.toLocaleString("en-US")} | ${mcycles(self)} | ` +
-        `${percent(incl, totalCest)}% | ${percent(self, totalCest)}% |`,
+      `| ${index + 1} | ${source ? `\`${escapePipes(source)}\`` : "—"} | \`${shorten(func)}\` | ` +
+        `${mcycles(self)} | ${percent(incl, totalCest)}% | ${percent(self, totalCest)}% | ` +
+        `${calls === undefined ? "—" : calls.toLocaleString("en-US")} |`,
     );
   });
   lines.push("");

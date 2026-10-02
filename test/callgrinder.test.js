@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { cest, isNamedRoutine, locationToFunc, parseAnnotate, parseCallCounts } = require("../src/callgrind");
 const { collectRows, loadConfig } = require("../src/categories");
-const { renderProfile, topRoutines } = require("../src/report");
+const { createReport, renderProfile, topRoutines } = require("../src/report");
 const { summarizeCallgrind } = require("../src/profile");
 
 // A synthetic callgrind_annotate --inclusive output, with the (NN%) percentages callgrind adds.
@@ -96,6 +96,37 @@ calls=7 0
   assert.equal(calls.get("neverCalled"), 0);
   assert.equal(calls.get("0xabc in libG4.so"), 7);
   assert.throws(() => parseCallCounts("cfn=(99)"), /undefined Callgrind name ID/);
+});
+
+test("ABI-tagged symbols retain their incoming calls and source basename in the summary", () => {
+  const { total, rows } = parseAnnotate(`Events shown: Ir
+100 PROGRAM TOTALS
+Ir file:function
+10 /build/sources/name.cc:Example::name[abi:cxx11]() [/build/objects/libExample.so]
+`);
+  const callsByFunc = parseCallCounts(`ob=(1) /build/objects/libExample.so
+fn=(1) caller
+cfn=(2) Example::name[abi:cxx11]()
+calls=7 1
+1 70
+fn=(2)
+cfn=(2)
+calls=2 1
+1 20
+`);
+  const { markdown, structured } = renderProfile({
+    title: "ABI tags",
+    config: loadConfig(),
+    inclTotal: total,
+    inclRows: rows,
+    selfRows: rows,
+    callsByFunc,
+  });
+  assert.equal(callsByFunc.get("Example::name[abi:cxx11]()"), 9);
+  assert.match(markdown, /\| 1 \| `name.cc` \| `Example::name\[abi:cxx11\]\(\)` \|.* \| 9 \|/);
+  assert.doesNotMatch(markdown, /\/build\//);
+  assert.equal(structured.top_routines[0].source, "name.cc");
+  assert.equal(structured.top_routines[0].calls, 9);
 });
 
 test("source annotations and inclusive call-site costs never become self-cost routines", () => {
@@ -193,11 +224,11 @@ test("top routines are selected by self cost before ordering by inclusive share"
   });
   assert.match(
     markdown,
-    /\| # \| Routine \| Source \/ package \| Calls \| Self \(Mcycles\) \| % of run \| Self % \|/,
+    /\| # \| Source \/ package \| Routine \| Self \(Mcycles\) \| % of run \| Self % \| Calls \|/,
   );
   assert.match(markdown, /Selected by highest \*\*Self %\*\*, then ordered by \*\*% of run\*\*/);
-  assert.match(markdown, /\| 1 \| `C` \| — \| — \| 0.3 \| 90.00% \| 30.00% \|/);
-  assert.match(markdown, /\| 2 \| `B` \| — \| — \| 0.5 \| 80.00% \| 50.00% \|/);
+  assert.match(markdown, /\| 1 \| — \| `C` \| 0.3 \| 90.00% \| 30.00% \| — \|/);
+  assert.match(markdown, /\| 2 \| — \| `B` \| 0.5 \| 80.00% \| 50.00% \| — \|/);
   assert.match(markdown, /Self cost of listed routines: \*\*80.00%\*\*/);
   assert.match(markdown, /Self cost of remaining routines: \*\*20.00%\*\*/);
   assert.match(markdown, /\| A \| `\^A\$` \| 1.0 \| 100.00% \| 20.00% \|/);
@@ -222,8 +253,8 @@ test("routine metadata combines sources without double-counting the two annotati
     selfRows: rows,
     callsByFunc: new Map([["Dispatch::run()", 1234], ["root", 0]]),
   });
-  assert.match(markdown, /`Dispatch::run\(\)` \| `a.cc, plugin.so` \| 1,234 \|/);
-  assert.match(markdown, /`root` \| `main.cc` \| 0 \|/);
+  assert.match(markdown, /`a.cc, plugin.so` \| `Dispatch::run\(\)` \|.* \| 1,234 \|/);
+  assert.match(markdown, /`main.cc` \| `root` \|.* \| 0 \|/);
   assert.equal(structured.top_routines[0].calls, 1234);
   assert.equal(structured.top_routines[0].source, "a.cc, plugin.so");
 });
@@ -248,11 +279,18 @@ calls=5539090 1
     fs.rmSync(dir, { recursive: true, force: true });
   });
   const result = summarizeCallgrind({ name: "counts", callgrindFile: file, outputDirectory: dir });
-  assert.match(result.markdown, /`gfield.cc` \| 5,539,090 \|/);
+  assert.match(result.markdown, /`gfield.cc` \| `GField_/);
+  assert.match(result.markdown, /\| 5,539,090 \|/);
   const partial = JSON.parse(fs.readFileSync(result.partialFile, "utf8"));
   const field = partial.top_routines.find((row) => row.routine.startsWith("GField_"));
   assert.equal(field.source, "gfield.cc");
   assert.equal(field.calls, 5539090);
+  const report = createReport({ inputDirectory: dir, outputDirectory: path.join(dir, "report") });
+  const summary = fs.readFileSync(report.summaryFile, "utf8");
+  assert.match(summary, /\| # \| Source \/ package \| Routine \|.* \| Calls \|/);
+  assert.match(summary, /`gfield.cc` \| `GField_.* \| 5,539,090 \|/);
+  assert.doesNotMatch(summary, /\/o\//);
+  assert.deepEqual(JSON.parse(fs.readFileSync(report.jsonFile, "utf8")), [partial]);
 });
 
 test("topRoutines selects by self cost and drops artifacts", () => {
