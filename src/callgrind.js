@@ -94,7 +94,9 @@ function parseCallCounts(text) {
     }
     return names.get(match[1]);
   };
-  const name = (func, owner) => locationToFunc(`${func}${owner ? ` [${owner}]` : ""}`);
+  // Raw fn/cfn records contain only a symbol. Supply a file separator so single colons inside
+  // demangled symbols (e.g. [abi:cxx11]) cannot be mistaken for a source-file separator.
+  const name = (func, owner) => locationToFunc(`???:${func}${owner ? ` [${owner}]` : ""}`);
   for (const line of text.split("\n")) {
     const match = line.match(/^(ob|cob|fn|cfn|calls)=(.*)$/);
     if (!match) {
