@@ -114,7 +114,7 @@ function parseCallGraph(text) {
     return id;
   };
   for (const line of text.split("\n")) {
-    const match = line.match(/^(ob|cob|fl|fi|fe|cfl|cfi|cfe|fn|cfn|calls)=(.*)$/);
+    const match = line.match(/^(ob|cob|fl|fi|fe|cfl|cfi|cfe|jfi|fn|cfn|jfn|calls)=(.*)$/);
     if (!match) {
       continue;
     }
@@ -123,7 +123,7 @@ function parseCallGraph(text) {
       object = resolve(value, objects);
     } else if (key === "cob") {
       calleeObject = resolve(value, objects);
-    } else if (["fl", "fi", "fe", "cfl", "cfi", "cfe"].includes(key)) {
+    } else if (["fl", "fi", "fe", "cfl", "cfi", "cfe", "jfi"].includes(key)) {
       const source = resolve(value, files);
       if (key === "fl") {
         file = source;
@@ -139,6 +139,9 @@ function parseCallGraph(text) {
       callee = null;
       calleeObject = null;
       calleeFile = null;
+    } else if (key === "jfn") {
+      // Jump targets share the function-name dictionary but do not create incoming call arcs.
+      resolve(value, functions);
     } else if (key === "cfn") {
       callee = resolve(value, functions);
     } else if (callee !== null) {

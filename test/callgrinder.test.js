@@ -275,6 +275,38 @@ calls=7 0
   assert.throws(() => parseCallCounts("cfn=(99)"), /undefined Callgrind name ID/);
 });
 
+test("jump targets define shared compressed names without becoming incoming calls", () => {
+  const graph = parseCallGraph(`ob=(1) /o/app
+fl=(1) /o/startup.c
+fn=(1) startup
+jfi=(2) /o/smoke.c
+jfn=(2) main
+jump=40 1
+1 0
+jcnd=100/50 1
+1 0
+cfl=(2)
+cfn=(2)
+jfn=(3) otherJumpTarget
+calls=1 1
+1 100
+fl=(2)
+fn=(2)
+cfn=(4) workload
+calls=100000 1
+1 1000000
+fn=(4)
+1 1000000
+`);
+  assert.equal(graph.callsByFunc.get("main"), 1);
+  assert.equal(graph.callsByFunc.get("workload"), 100000);
+  assert.equal(graph.callsByFunc.has("otherJumpTarget"), false);
+  assert.deepEqual(callerInfo(graph)(["main"]).direct_callers, [{ routine: "startup", calls: 1 }]);
+  const main = [...graph.nodes.values()].find((node) => node.routine === "main");
+  assert.deepEqual([...main.files], ["/o/smoke.c"]);
+  assert.throws(() => parseCallGraph("jfn=(99)"), /undefined Callgrind name ID/);
+});
+
 test("ABI-tagged symbols retain incoming calls in the summary and source metadata in JSON", () => {
   const { total, rows } = parseAnnotate(`Events shown: Ir
 100 PROGRAM TOTALS
@@ -450,7 +482,12 @@ test("summarizeCallgrind reads raw call counts into Markdown and JSON", (t) => {
   fs.writeFileSync(file, `events: Ir
 ob=/o/gemc
 fn=main
-cfn=GField_AsciiMapFactory::GetFieldValue(double const*, double*) const
+jfi=(1) /o/gfield.cc
+jfn=(1) GField_AsciiMapFactory::GetFieldValue(double const*, double*) const
+jump=2 1
+1 0
+cfl=(1)
+cfn=(1)
 calls=5539090 1
 1 120000000
 `);
@@ -566,8 +603,14 @@ test("CI verification accepts zero entry calls and still rejects missing or inco
     fs.mkdirSync(parts);
     const raw = `events: Ir
 ob=/o/callgrinder-smoke
-fl=/o/smoke.c
-${incoming ? "fn=(3) startup\ncfn=(1) main\ncalls=1 1\n1 3000000\n" : ""}fn=(1) main
+fl=(3) /o/startup.c
+fn=(3) startup
+jfi=(1) /o/smoke.c
+jfn=(1) main
+jump=1 1
+1 0
+${incoming ? "cfl=(1)\ncfn=(1)\ncalls=1 1\n1 3000000\n" : ""}fl=(1)
+fn=(1)
 1 2000000
 cfn=(2) workload
 calls=100000 1

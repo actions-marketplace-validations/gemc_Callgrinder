@@ -83,6 +83,9 @@ jobs:
           assert.equal(process.env.JOB_COUNT, '1');
           const profile = JSON.parse(read('PROFILE_FILE'));
           assert.equal(profile.name, 'smoke');
+          const unavailable = /Profile summary unavailable|(?:table|callers) unavailable/i;
+          const diagnostics = profile.markdown.split('\n').filter((line) => unavailable.test(line));
+          assert.deepEqual(diagnostics, [], 'The profile must parse successfully before checking call counts');
           assert.ok(profile.total.ir > 0, 'The target must produce instruction counts');
           assert.ok(profile.total.cest > 0, 'The target must produce cycle estimates');
           const workload = profile.categories.find((row) => row.label === 'Test workload');
@@ -106,8 +109,7 @@ jobs:
           const headers = read('SUMMARY_FILE').split('\n').filter((line) => line.startsWith('| # |'));
           assert.equal(headers.length, 2);
           assert.equal(headers[0], headers[1]);
-          assert.doesNotMatch(read('SUMMARY_FILE'),
-            /Profile summary unavailable|(?:table|callers) unavailable/i);
+          assert.doesNotMatch(read('SUMMARY_FILE'), unavailable);
           assert.match(read('CSV_FILE'), /"smoke","Test workload"/);
           EOF
       - name: Upload smoke test results
