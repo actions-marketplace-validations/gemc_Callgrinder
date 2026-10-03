@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { cest, isNamedRoutine } = require("./callgrind");
 const { collectRows, inclByName, selfByName } = require("./categories");
+const { callableName, callerInfo } = require("./callers");
 const { ensureDirectory, walkJsonFiles } = require("./utils");
 
 const mcycles = (value) =>
@@ -23,14 +24,11 @@ function topRoutines(selfRows, count) {
 }
 
 // Full markdown section for one profile: category table + top-routines table.
-function renderProfile({ title, config, inclTotal, inclRows, selfRows, callsByFunc = new Map() }) {
+function renderProfile({ title, config, inclTotal, inclRows, selfRows, callGraph, callsByFunc }) {
+  callsByFunc = callGraph?.callsByFunc || callsByFunc || new Map();
   const totalCest = cest(inclTotal);
-  const rows = collectRows(config, inclRows, selfRows);
+  const categoryRows = collectRows(config, inclRows, selfRows);
   const inclByFunc = inclByName(inclRows);
-  const routines = topRoutines(selfRows, config.top_routines || 10)
-    .map(([func, self]) => [func, inclByFunc.get(func) ?? self])
-    .sort((a, b) => b[1] - a[1]);
-  const selfByFunc = selfByName(selfRows);
   const sourcesByFunc = new Map();
   for (const [func, , metadata] of [...selfRows, ...inclRows]) {
     if (metadata?.source) {
@@ -40,7 +38,56 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows, callsByFu
       sourcesByFunc.get(func).add(metadata.source);
     }
   }
-  const sourceOf = (func) => [...(sourcesByFunc.get(func) || [])].sort().join(", ") || null;
+  const callersOf = callerInfo(callGraph, config);
+  const metadataOf = (names) => {
+    const routines = [...new Set(names)];
+    const sources = new Set(routines.flatMap((func) => [...(sourcesByFunc.get(func) || [])]));
+    return {
+      source: [...sources].sort().join(", ") || null,
+      calls: routines.every((func) => callsByFunc.has(func))
+        ? routines.reduce((sum, func) => sum + callsByFunc.get(func), 0) : null,
+      ...callersOf(routines),
+    };
+  };
+  const rows = categoryRows.map((row) => ({ ...row, ...metadataOf(row.routines) }));
+  const routines = topRoutines(selfRows, config.top_routines || 10)
+    .map(([routine, self]) => ({
+      routine,
+      self,
+      incl: inclByFunc.get(routine) ?? self,
+      categories: rows.filter((row) => row.routines.includes(routine)).map((row) => row.label),
+      ...metadataOf([routine]),
+    }))
+    .sort((a, b) => b.incl - a.incl);
+
+  // Both tables share the renderer so their columns, units, and formatting always agree.
+  const table = (entries) => {
+    const lines = [
+      "| # | Category | Routine / entry symbol(s) | Inclusive (Mcycles) | " +
+        "Self (Mcycles) | % of run | Self % | Calls | Direct callers (calls) |",
+      "|---|----------|---------------------------|--------------------:|" +
+        "---------------:|---------:|-------:|------:|------------------------|",
+    ];
+    entries.forEach((row, index) => {
+      const category = row.label || row.categories.join(", ") || "—";
+      const direct = row.direct_callers.map((caller) =>
+        `\`${shorten(caller.routine)}\` (${caller.calls.toLocaleString("en-US")})`).join("<br>") || "—";
+      const projectNames = [...new Set(
+        row.nearest_project_callers.map((caller) => callableName(caller.routine)),
+      )];
+      const project = projectNames.slice(0, 3).map((name) => `\`${shorten(name)}\``).join(", ");
+      const more = projectNames.length > 3 ? `; +${projectNames.length - 3} more` : "";
+      const context = project ? ` (${project}${more})` : "";
+      const symbol = `\`${shorten(row.routine || row.symbol)}\`${context}`;
+      lines.push(
+        `| ${index + 1} | ${escapePipes(category)} | ` +
+          `${symbol} | ${mcycles(row.incl)} | ${mcycles(row.self)} | ` +
+          `${percent(row.incl, totalCest)}% | ${percent(row.self, totalCest)}% | ` +
+          `${row.calls === null ? "—" : row.calls.toLocaleString("en-US")} | ${direct} |`,
+      );
+    });
+    return lines;
+  };
 
   const lines = [`### ${title}`, ""];
   lines.push(
@@ -49,19 +96,18 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows, callsByFu
   );
   lines.push("");
   lines.push(
-    "Category **Inclusive %** includes callees, so the same work can appear in several rows. " +
-      "These rows are not a partition of the run and must not be added. **Entry self %** counts only " +
-      "work directly in the matched entry routines; category patterns can also overlap.",
+    "Both tables use the same columns. Categories group the configured entry routines; the top table " +
+      "lists individual routines. **% of run** includes callees and overlaps, so it must not be added. " +
+      "**Self %** counts only direct work; overlapping category patterns can repeat that work.",
+    "Names in parentheses identify the nearest project callers, walking upstream past runtime functions " +
+      "such as malloc, strtod, and C++ stream helpers. Up to three distinct function names are shown; " +
+      "+N more indicates additional names, available in JSON with full signatures and hop distances. " +
+      "Project ownership is inferred from runtime names or configured with project_callers. " +
+      "**Calls** sums recorded incoming calls, including recursion; **Direct callers** lists each caller " +
+      "with its recorded calls. — means no match or unavailable data.",
     "",
   );
-  lines.push("| Category | Entry symbol(s) | Inclusive (Mcycles) | Inclusive % (overlapping) | Entry self % |");
-  lines.push("|----------|-----------------|--------------------:|--------------------------:|-------------:|");
-  for (const row of rows) {
-    lines.push(
-      `| ${row.label} | \`${row.symbol}\` | ${mcycles(row.incl)} | ` +
-        `${percent(row.incl, totalCest)}% | ${percent(row.self, totalCest)}% |`,
-    );
-  }
+  lines.push(...table(rows));
   lines.push("");
   lines.push(`### Top ${routines.length} routines by self cost, ordered by inclusive cost (CEst)`, "");
   lines.push(
@@ -69,24 +115,11 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows, callsByFu
       "(inclusive: routine + callees). " +
       "Inclusive shares overlap and must not be added. **Self %** counts only cycles executed " +
       "directly in each routine; those shares sum to at most 100% (apart from rounding).",
-    "Source / package shows the source filename, falling back to the binary or library name. " +
-      "**Calls** shows recorded incoming calls, including recursion; — means not recorded.",
   );
   lines.push("");
-  lines.push("| # | Source / package | Routine | Self (Mcycles) | % of run | Self % | Calls |");
-  lines.push("|---|------------------|---------|---------------:|---------:|-------:|------:|");
-  routines.forEach(([func, incl], index) => {
-    const self = selfByFunc.get(func) || 0;
-    const source = sourceOf(func);
-    const calls = callsByFunc.get(func);
-    lines.push(
-      `| ${index + 1} | ${source ? `\`${escapePipes(source)}\`` : "—"} | \`${shorten(func)}\` | ` +
-        `${mcycles(self)} | ${percent(incl, totalCest)}% | ${percent(self, totalCest)}% | ` +
-        `${calls === undefined ? "—" : calls.toLocaleString("en-US")} |`,
-    );
-  });
+  lines.push(...table(routines));
   lines.push("");
-  const listedCost = routines.reduce((sum, [func]) => sum + (selfByFunc.get(func) || 0), 0);
+  const listedCost = routines.reduce((sum, row) => sum + row.self, 0);
   lines.push(
     `Self cost of listed routines: **${percent(listedCost, totalCest)}%** of the run. ` +
       `Self cost of remaining routines: **${percent(totalCest - listedCost, totalCest)}%**.`,
@@ -96,13 +129,7 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows, callsByFu
   const structured = {
     total: { cest: totalCest, ir: inclTotal.Ir || 0 },
     categories: rows,
-    top_routines: routines.map(([routine, incl]) => ({
-      routine,
-      self: selfByFunc.get(routine) || 0,
-      incl,
-      source: sourceOf(routine),
-      calls: callsByFunc.get(routine) ?? null,
-    })),
+    top_routines: routines,
   };
   return { markdown: lines.join("\n"), structured };
 }

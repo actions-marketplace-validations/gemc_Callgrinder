@@ -72,14 +72,19 @@ function locationToFunc(location) {
   return parseLocation(location).func;
 }
 
-// Sum incoming call arcs, including recursive calls and copies in different objects. Function and
-// object IDs are shared between caller/callee records; an ID can be defined in either kind of record.
-function parseCallCounts(text) {
+// Read incoming call arcs, retaining object identities so walking callers cannot connect unrelated
+// copies of a symbol. Compressed name IDs are shared between caller/callee records of the same kind.
+function parseCallGraph(text) {
   const functions = new Map();
   const objects = new Map();
+  const files = new Map();
   const calls = new Map();
+  const nodes = new Map();
   let object = "";
+  let file = "";
+  let caller = null;
   let calleeObject = null;
+  let calleeFile = null;
   let callee = null;
   const resolve = (value, names) => {
     const match = value.match(/^\((\d+)\)(?:\s+(.*))?$/);
@@ -97,8 +102,19 @@ function parseCallCounts(text) {
   // Raw fn/cfn records contain only a symbol. Supply a file separator so single colons inside
   // demangled symbols (e.g. [abi:cxx11]) cannot be mistaken for a source-file separator.
   const name = (func, owner) => locationToFunc(`???:${func}${owner ? ` [${owner}]` : ""}`);
+  const node = (func, owner, source) => {
+    const routine = name(func, owner);
+    const id = JSON.stringify([owner, routine]);
+    if (!nodes.has(id)) {
+      nodes.set(id, { routine, object: owner, files: new Set(), callers: new Map() });
+    }
+    if (source && source !== "???" && source !== "??") {
+      nodes.get(id).files.add(source);
+    }
+    return id;
+  };
   for (const line of text.split("\n")) {
-    const match = line.match(/^(ob|cob|fn|cfn|calls)=(.*)$/);
+    const match = line.match(/^(ob|cob|fl|fi|fe|cfl|cfi|cfe|jfi|fn|cfn|jfn|calls)=(.*)$/);
     if (!match) {
       continue;
     }
@@ -107,13 +123,25 @@ function parseCallCounts(text) {
       object = resolve(value, objects);
     } else if (key === "cob") {
       calleeObject = resolve(value, objects);
+    } else if (["fl", "fi", "fe", "cfl", "cfi", "cfe", "jfi"].includes(key)) {
+      const source = resolve(value, files);
+      if (key === "fl") {
+        file = source;
+      } else if (key === "cfl") {
+        calleeFile = source;
+      }
     } else if (key === "fn") {
-      const func = name(resolve(value, functions), object);
+      caller = node(resolve(value, functions), object, file);
+      const func = nodes.get(caller).routine;
       if (!calls.has(func)) {
         calls.set(func, 0);
       }
       callee = null;
       calleeObject = null;
+      calleeFile = null;
+    } else if (key === "jfn") {
+      // Jump targets share the function-name dictionary but do not create incoming call arcs.
+      resolve(value, functions);
     } else if (key === "cfn") {
       callee = resolve(value, functions);
     } else if (callee !== null) {
@@ -121,11 +149,20 @@ function parseCallCounts(text) {
       if (!count) {
         throw new Error(`invalid Callgrind call count: ${value}`);
       }
-      const func = name(callee, calleeObject ?? object);
-      calls.set(func, (calls.get(func) || 0) + Number(count[0]));
+      const target = node(callee, calleeObject ?? object, calleeFile);
+      const entry = nodes.get(target);
+      const callCount = Number(count[0]);
+      calls.set(entry.routine, (calls.get(entry.routine) || 0) + callCount);
+      if (caller !== null && callCount > 0) {
+        entry.callers.set(caller, (entry.callers.get(caller) || 0) + callCount);
+      }
     }
   }
-  return calls;
+  return { nodes, callsByFunc: calls };
+}
+
+function parseCallCounts(text) {
+  return parseCallGraph(text).callsByFunc;
 }
 
 // Drop callgrind_annotate summary artifacts (e.g. "events annotated") that are not routines.
@@ -261,5 +298,6 @@ module.exports = {
   locationToFunc,
   parseAnnotate,
   parseCallCounts,
+  parseCallGraph,
   runCallgrind,
 };

@@ -32,10 +32,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y valgrind gcc
           cat > "$RUNNER_TEMP/smoke.c" <<'EOF'
+          __attribute__((noinline)) static unsigned long workload(unsigned long i) {
+            return i + 1;
+          }
           int main(void) {
             volatile unsigned long sum = 0;
             for (unsigned long i = 0; i < 100000; ++i) {
-              sum += i;
+              sum += workload(i);
             }
             return sum == 0;
           }
@@ -80,6 +83,9 @@ jobs:
           assert.equal(process.env.JOB_COUNT, '1');
           const profile = JSON.parse(read('PROFILE_FILE'));
           assert.equal(profile.name, 'smoke');
+          const unavailable = /Profile summary unavailable|(?:table|callers) unavailable/i;
+          const diagnostics = profile.markdown.split('\n').filter((line) => unavailable.test(line));
+          assert.deepEqual(diagnostics, [], 'The profile must parse successfully before checking call counts');
           assert.ok(profile.total.ir > 0, 'The target must produce instruction counts');
           assert.ok(profile.total.cest > 0, 'The target must produce cycle estimates');
           const workload = profile.categories.find((row) => row.label === 'Test workload');
@@ -87,11 +93,23 @@ jobs:
           assert.ok(profile.top_routines.some((row) => row.routine === 'main' && row.self > 0));
           const main = profile.top_routines.find((row) => row.routine === 'main');
           assert.equal(main.source, 'smoke.c');
-          assert.ok(main.calls > 0, 'The raw profile must supply incoming calls to main');
+          // A profile root can have measured work without a recorded incoming call arc.
+          assert.ok(Number.isSafeInteger(main.calls) && main.calls >= 0,
+            'The raw profile must supply a nonnegative recorded call count for main');
+          const helper = profile.top_routines.find((row) => row.routine === 'workload');
+          assert.ok(helper, 'The helper must appear among the top routines');
+          assert.equal(helper.calls, 100000);
+          assert.deepEqual(helper.direct_callers, [{ routine: 'main', calls: 100000 }]);
+          assert.ok(helper.nearest_project_callers.some((row) => row.routine === 'main' && row.distance === 1));
+          assert.equal(workload.source, 'smoke.c');
+          assert.equal(workload.direct_callers.reduce((sum, row) => sum + row.calls, 0), workload.calls);
           assert.match(read('CALLGRIND_FILE'), /events:.*Ir/);
           assert.deepEqual(JSON.parse(read('REPORT_FILE')), [profile]);
           assert.match(read('SUMMARY_FILE'), /Test workload/);
-          assert.doesNotMatch(read('SUMMARY_FILE'), /unavailable/i);
+          const headers = read('SUMMARY_FILE').split('\n').filter((line) => line.startsWith('| # |'));
+          assert.equal(headers.length, 2);
+          assert.equal(headers[0], headers[1]);
+          assert.doesNotMatch(read('SUMMARY_FILE'), unavailable);
           assert.match(read('CSV_FILE'), /"smoke","Test workload"/);
           EOF
       - name: Upload smoke test results

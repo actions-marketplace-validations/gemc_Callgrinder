@@ -4,7 +4,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { cest, isNamedRoutine, locationToFunc, parseAnnotate, parseCallCounts } = require("../src/callgrind");
+const { spawnSync } = require("node:child_process");
+const {
+  cest, isNamedRoutine, locationToFunc, parseAnnotate, parseCallCounts, parseCallGraph,
+} = require("../src/callgrind");
+const { callableName, callerInfo } = require("../src/callers");
 const { collectRows, loadConfig } = require("../src/categories");
 const { createReport, renderProfile, topRoutines } = require("../src/report");
 const { summarizeCallgrind } = require("../src/profile");
@@ -22,6 +26,179 @@ Ir I1mr D1mr D1mw ILmr DLmr DLmw file:function
     2,000,000 (0.2%)  0  0  0  0  0  0  events annotated
    50,000,000 (5.0%)  0  0  0  0  0  0  0x0000000009fe6140 (20x)
 `;
+
+// Project -> C++ runtime -> C runtime, with a second project caller, recursion, and a runtime cycle.
+const CALL_GRAPH = `ob=(1) /home/demo/myapp
+fl=(1) /home/demo/app.cc
+fn=(1) Demo::load()
+cob=(2) /usr/lib/libstdc++.so.6
+cfl=(2) /usr/include/c++/istream
+cfn=(2) std::__istream_extract()
+calls=20 1
+1 20
+ob=(2)
+fl=(2)
+fn=(2)
+cfn=(3) void std::helper<char>()
+calls=20 1
+1 20
+fn=(3)
+fi=(3) /build/glibc/stdlib/strtod_l.c
+cfl=(3)
+cob=(3) /lib/libc.so.6
+cfn=(4) ____strtod_l_internal
+calls=30 1
+1 30
+ob=(3)
+fl=(3)
+fn=(4)
+cfn=(4)
+calls=2 1
+1 2
+cob=(2)
+cfn=(2)
+calls=1 1
+1 1
+ob=(4) /opt/physics/libPhysics.so
+fl=(4) /home/physics/model.cc
+fn=(5) Physics::load()
+cob=(3)
+cfn=(4)
+calls=5 1
+1 5
+fn=(6) unusedCaller
+cfn=(4)
+calls=0 1
+1 0
+`;
+
+test("direct caller counts and nearest project callers follow separate runtime branches", () => {
+  const graph = parseCallGraph(CALL_GRAPH);
+  const info = callerInfo(graph)(["____strtod_l_internal"]);
+  assert.equal(graph.callsByFunc.get("____strtod_l_internal"), 37);
+  assert.deepEqual(info.direct_callers, [
+    { routine: "void std::helper<char>()", calls: 30 },
+    { routine: "Physics::load()", calls: 5 },
+    { routine: "____strtod_l_internal", calls: 2 },
+  ]);
+  assert.deepEqual(info.nearest_project_callers, [
+    { routine: "Physics::load()", source: "libPhysics.so", distance: 1 },
+    { routine: "Demo::load()", source: "myapp", distance: 3 },
+  ]);
+  assert.deepEqual(callerInfo(graph)(["std::__istream_extract()"]).nearest_project_callers, [
+    { routine: "Demo::load()", source: "myapp", distance: 1 },
+    { routine: "Physics::load()", source: "libPhysics.so", distance: 2 },
+  ]);
+});
+
+test("project caller patterns match arbitrary symbols, source paths, or owning objects", () => {
+  const graph = parseCallGraph(CALL_GRAPH);
+  for (const pattern of ["^Demo::", "/home/demo/app\\.cc$", "/home/demo/myapp$"]) {
+    const config = loadConfig(JSON.stringify({ project_callers: [pattern] }));
+    const info = callerInfo(graph, config)(["____strtod_l_internal"]);
+    assert.deepEqual(info.nearest_project_callers, [{ routine: "Demo::load()", source: "myapp", distance: 3 }]);
+    assert.equal(info.direct_callers.reduce((sum, row) => sum + row.calls, 0), 37);
+  }
+  assert.deepEqual(callerInfo(graph, { project_callers: [] })(["____strtod_l_internal"])
+    .nearest_project_callers, []);
+  assert.throws(() => loadConfig('{"project_callers":"Demo"}'), /array of regex strings/);
+  assert.throws(() => loadConfig('{"project_callers":[7]}'), /array of regex strings/);
+  assert.throws(() => loadConfig('{"project_callers":["["]}'), /Invalid regular expression/);
+});
+
+test("same-named functions in different objects do not create false upstream paths", () => {
+  const graph = parseCallGraph(`ob=/o/app
+fn=ProjectA::run()
+cob=/o/libOne.so
+cfn=helper
+calls=3 1
+1 3
+fn=ProjectB::run()
+cob=/o/libTwo.so
+cfn=helper
+calls=7 1
+1 7
+ob=/o/libOne.so
+fn=helper
+cob=/lib/libc.so.6
+cfn=target
+calls=3 1
+1 3
+ob=/o/libTwo.so
+fn=helper
+cob=/lib/libc.so.6
+cfn=unrelated
+calls=7 1
+1 7
+`);
+  const info = callerInfo(graph, { project_callers: ["^Project"] })(["target"]);
+  assert.deepEqual(info.direct_callers, [{ routine: "helper", calls: 3 }]);
+  assert.deepEqual(info.nearest_project_callers, [{ routine: "ProjectA::run()", source: "app", distance: 2 }]);
+});
+
+test("project functions returning standard types remain project callers through inlined runtime code", () => {
+  const graph = parseCallGraph(`ob=/o/app
+fn=std::function<void()> App::read[abi:cxx11]()
+cfn=void std::helper<char>()
+calls=3 1
+1 3
+fn=void std::helper<char>()
+cob=/lib/libc.so.6
+cfn=target
+calls=3 1
+1 3
+`);
+  const info = callerInfo(graph)(["target"]);
+  assert.deepEqual(info.direct_callers, [{ routine: "void std::helper<char>()", calls: 3 }]);
+  assert.deepEqual(info.nearest_project_callers, [
+    { routine: "std::function<void()> App::read[abi:cxx11]()", source: "app", distance: 2 },
+  ]);
+});
+
+test("category and routine tables share costs and caller columns without duplicating matched calls", () => {
+  const graph = parseCallGraph(CALL_GRAPH);
+  const config = loadConfig(JSON.stringify({
+    categories: [
+      { label: "Input", match: "^____strtod_l_internal$|^std::__istream_extract" },
+      { family: "Loading", discover: "(Demo|Physics)::load" },
+      { label: "Missing", match: "^notInProfile$" },
+    ],
+  }));
+  const rows = [
+    ["____strtod_l_internal", { Ir: 100 }, { source: "strtod_l.c" }],
+    ["____strtod_l_internal", { Ir: 50 }, { source: "gmp.h" }],
+    ["std::__istream_extract()", { Ir: 40 }, { source: "libstdc++.so.6" }],
+    ["Demo::load()", { Ir: 5 }, { source: "app.cc" }],
+    ["Physics::load()", { Ir: 5 }, { source: "model.cc" }],
+  ];
+  const { markdown, structured } = renderProfile({
+    title: "Matched tables", config, inclTotal: { Ir: 400 },
+    inclRows: rows.map(([func, counts, metadata]) => [func, { Ir: counts.Ir * 2 }, metadata]),
+    selfRows: rows, callGraph: graph,
+  });
+  const headers = markdown.split("\n").filter((line) => line.startsWith("| # |"));
+  assert.equal(headers.length, 2);
+  assert.equal(headers[0], headers[1]);
+  assert.ok(markdown.includes("^____strtod_l_internal$\\|^std::__istream_extract"));
+  const input = structured.categories.find((row) => row.label === "Input");
+  assert.equal(input.incl, 280);
+  assert.equal(input.self, 190);
+  assert.equal(input.source, "gmp.h, libstdc++.so.6, strtod_l.c");
+  assert.equal(input.calls, 58); // 37 strtod + 21 extract, including calls between matched routines.
+  assert.equal(input.direct_callers.reduce((sum, caller) => sum + caller.calls, 0), input.calls);
+  assert.deepEqual(input.nearest_project_callers, [
+    { routine: "Demo::load()", source: "myapp", distance: 1 },
+    { routine: "Physics::load()", source: "libPhysics.so", distance: 1 },
+  ]);
+  const strtod = structured.top_routines.find((row) => row.routine === "____strtod_l_internal");
+  assert.equal(strtod.calls, 37);
+  assert.deepEqual(strtod.categories, ["Input"]);
+  const missing = structured.categories.find((row) => row.label === "Missing");
+  assert.equal(missing.calls, 0);
+  assert.equal(missing.source, null);
+  assert.deepEqual(missing.direct_callers, []);
+  assert.deepEqual(missing.nearest_project_callers, []);
+});
 
 test("cest applies the KCachegrind cache formula", () => {
   assert.equal(cest({ Ir: 100, I1mr: 1, D1mr: 1, ILmr: 1 }), 100 + 10 * 2 + 100 * 1);
@@ -98,7 +275,39 @@ calls=7 0
   assert.throws(() => parseCallCounts("cfn=(99)"), /undefined Callgrind name ID/);
 });
 
-test("ABI-tagged symbols retain their incoming calls and source basename in the summary", () => {
+test("jump targets define shared compressed names without becoming incoming calls", () => {
+  const graph = parseCallGraph(`ob=(1) /o/app
+fl=(1) /o/startup.c
+fn=(1) startup
+jfi=(2) /o/smoke.c
+jfn=(2) main
+jump=40 1
+1 0
+jcnd=100/50 1
+1 0
+cfl=(2)
+cfn=(2)
+jfn=(3) otherJumpTarget
+calls=1 1
+1 100
+fl=(2)
+fn=(2)
+cfn=(4) workload
+calls=100000 1
+1 1000000
+fn=(4)
+1 1000000
+`);
+  assert.equal(graph.callsByFunc.get("main"), 1);
+  assert.equal(graph.callsByFunc.get("workload"), 100000);
+  assert.equal(graph.callsByFunc.has("otherJumpTarget"), false);
+  assert.deepEqual(callerInfo(graph)(["main"]).direct_callers, [{ routine: "startup", calls: 1 }]);
+  const main = [...graph.nodes.values()].find((node) => node.routine === "main");
+  assert.deepEqual([...main.files], ["/o/smoke.c"]);
+  assert.throws(() => parseCallGraph("jfn=(99)"), /undefined Callgrind name ID/);
+});
+
+test("ABI-tagged symbols retain incoming calls in the summary and source metadata in JSON", () => {
   const { total, rows } = parseAnnotate(`Events shown: Ir
 100 PROGRAM TOTALS
 Ir file:function
@@ -123,7 +332,7 @@ calls=2 1
     callsByFunc,
   });
   assert.equal(callsByFunc.get("Example::name[abi:cxx11]()"), 9);
-  assert.match(markdown, /\| 1 \| `name.cc` \| `Example::name\[abi:cxx11\]\(\)` \|.* \| 9 \|/);
+  assert.match(markdown, /\| 1 \| — \| `Example::name\[abi:cxx11\]\(\)` \|.* \| 9 \|/);
   assert.doesNotMatch(markdown, /\/build\//);
   assert.equal(structured.top_routines[0].source, "name.cc");
   assert.equal(structured.top_routines[0].calls, 9);
@@ -205,7 +414,11 @@ test("renderProfile emits both tables and excludes the artifact routine", () => 
   const { total, rows } = parseAnnotate(ANNOTATE);
   const config = loadConfig(JSON.stringify({ categories: [{ family: "F", discover: "(GField_\\w+)::GetFieldValue" }] }));
   const { markdown } = renderProfile({ title: "t", config, inclTotal: total, inclRows: rows, selfRows: rows });
-  assert.match(markdown, /\| Inclusive \(Mcycles\) \| Inclusive % \(overlapping\) \| Entry self % \|/);
+  const headers = markdown.split("\n").filter((line) => line.startsWith("| # |"));
+  assert.equal(headers.length, 2);
+  assert.equal(headers[0], headers[1]);
+  assert.match(headers[0], /Inclusive \(Mcycles\).*Self \(Mcycles\).*Direct callers/);
+  assert.doesNotMatch(headers[0], /Source|Nearest project caller/);
   assert.match(markdown, /Top \d+ routines by self cost, ordered by inclusive cost/);
   assert.doesNotMatch(markdown, /events annotated/);
 });
@@ -222,20 +435,23 @@ test("top routines are selected by self cost before ordering by inclusive share"
     inclRows: [["A", { Ir: 1_000_000 }], ["B", { Ir: 800_000 }], ["C", { Ir: 900_000 }]],
     selfRows: [["A", { Ir: 200_000 }], ["B", { Ir: 500_000 }], ["C", { Ir: 300_000 }]],
   });
-  assert.match(
-    markdown,
-    /\| # \| Source \/ package \| Routine \| Self \(Mcycles\) \| % of run \| Self % \| Calls \|/,
-  );
+  assert.match(markdown, /\| # \| Category \| Routine \/ entry symbol\(s\) \|/);
   assert.match(markdown, /Selected by highest \*\*Self %\*\*, then ordered by \*\*% of run\*\*/);
-  assert.match(markdown, /\| 1 \| — \| `C` \| 0.3 \| 90.00% \| 30.00% \| — \|/);
-  assert.match(markdown, /\| 2 \| — \| `B` \| 0.5 \| 80.00% \| 50.00% \| — \|/);
+  assert.match(markdown, /\| 1 \| — \| `C` \| 0.9 \| 0.3 \| 90.00% \| 30.00% \| — \|/);
+  assert.match(markdown, /\| 2 \| B \| `B` \| 0.8 \| 0.5 \| 80.00% \| 50.00% \| — \|/);
   assert.match(markdown, /Self cost of listed routines: \*\*80.00%\*\*/);
   assert.match(markdown, /Self cost of remaining routines: \*\*20.00%\*\*/);
-  assert.match(markdown, /\| A \| `\^A\$` \| 1.0 \| 100.00% \| 20.00% \|/);
-  assert.match(markdown, /\| B \| `\^B\$` \| 0.8 \| 80.00% \| 50.00% \|/);
+  assert.match(markdown, /\| A \| `\^A\$` \| 1.0 \| 0.2 \| 100.00% \| 20.00% \|/);
+  assert.match(markdown, /\| B \| `\^B\$` \| 0.8 \| 0.5 \| 80.00% \| 50.00% \|/);
   assert.deepEqual(structured.top_routines, [
-    { routine: "C", incl: 900_000, self: 300_000, source: null, calls: null },
-    { routine: "B", incl: 800_000, self: 500_000, source: null, calls: null },
+    {
+      routine: "C", incl: 900_000, self: 300_000, source: null, calls: null, categories: [],
+      direct_callers: [], nearest_project_callers: [],
+    },
+    {
+      routine: "B", incl: 800_000, self: 500_000, source: null, calls: null, categories: ["B"],
+      direct_callers: [], nearest_project_callers: [],
+    },
   ]);
 });
 
@@ -253,8 +469,9 @@ test("routine metadata combines sources without double-counting the two annotati
     selfRows: rows,
     callsByFunc: new Map([["Dispatch::run()", 1234], ["root", 0]]),
   });
-  assert.match(markdown, /`a.cc, plugin.so` \| `Dispatch::run\(\)` \|.* \| 1,234 \|/);
-  assert.match(markdown, /`main.cc` \| `root` \|.* \| 0 \|/);
+  assert.match(markdown, /`Dispatch::run\(\)` \|.* \| 1,234 \|/);
+  assert.match(markdown, /`root` \|.* \| 0 \|/);
+  assert.doesNotMatch(markdown, /a\.cc|plugin\.so|main\.cc/);
   assert.equal(structured.top_routines[0].calls, 1234);
   assert.equal(structured.top_routines[0].source, "a.cc, plugin.so");
 });
@@ -265,7 +482,12 @@ test("summarizeCallgrind reads raw call counts into Markdown and JSON", (t) => {
   fs.writeFileSync(file, `events: Ir
 ob=/o/gemc
 fn=main
-cfn=GField_AsciiMapFactory::GetFieldValue(double const*, double*) const
+jfi=(1) /o/gfield.cc
+jfn=(1) GField_AsciiMapFactory::GetFieldValue(double const*, double*) const
+jump=2 1
+1 0
+cfl=(1)
+cfn=(1)
 calls=5539090 1
 1 120000000
 `);
@@ -278,17 +500,28 @@ calls=5539090 1
     process.env.PATH = originalPath;
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  const result = summarizeCallgrind({ name: "counts", callgrindFile: file, outputDirectory: dir });
-  assert.match(result.markdown, /`gfield.cc` \| `GField_/);
+  const result = summarizeCallgrind({
+    name: "counts", callgrindFile: file, outputDirectory: dir,
+    config: JSON.stringify({ categories: [{ label: "Field", match: "^GField_" }] }),
+  });
+  assert.doesNotMatch(result.markdown, /gfield\.cc/);
   assert.match(result.markdown, /\| 5,539,090 \|/);
   const partial = JSON.parse(fs.readFileSync(result.partialFile, "utf8"));
   const field = partial.top_routines.find((row) => row.routine.startsWith("GField_"));
   assert.equal(field.source, "gfield.cc");
   assert.equal(field.calls, 5539090);
+  assert.deepEqual(field.direct_callers, [{ routine: "main", calls: 5539090 }]);
+  assert.deepEqual(field.nearest_project_callers, [{ routine: "main", source: "gemc", distance: 1 }]);
+  const category = partial.categories[0];
+  assert.equal(category.source, field.source);
+  assert.equal(category.calls, field.calls);
+  assert.deepEqual(category.direct_callers, field.direct_callers);
+  assert.deepEqual(category.nearest_project_callers, field.nearest_project_callers);
+  assert.match(result.markdown, /`GField_[^\n]+` \(`main`\).*`main` \(5,539,090\)/);
   const report = createReport({ inputDirectory: dir, outputDirectory: path.join(dir, "report") });
   const summary = fs.readFileSync(report.summaryFile, "utf8");
-  assert.match(summary, /\| # \| Source \/ package \| Routine \|.* \| Calls \|/);
-  assert.match(summary, /`gfield.cc` \| `GField_.* \| 5,539,090 \|/);
+  assert.match(summary, /\| # \| Category \|.* \| Calls \| Direct callers/);
+  assert.match(summary, /`GField_.* \(`main`\).* \| 5,539,090 \|/);
   assert.doesNotMatch(summary, /\/o\//);
   assert.deepEqual(JSON.parse(fs.readFileSync(report.jsonFile, "utf8")), [partial]);
 });
@@ -298,6 +531,49 @@ test("topRoutines selects by self cost and drops artifacts", () => {
   const ranked = topRoutines(rows, 10).map(([func]) => func);
   assert.equal(ranked[0], "G4PropagatorInField::ComputeStep(G4FieldTrack&)");
   assert.ok(!ranked.includes("events annotated"));
+});
+
+test("inline project caller names identify the code behind runtime helper calls", () => {
+  const rows = [["____strtod_l_internal", { Ir: 37 }, { source: "strtod_l.c" }]];
+  const { markdown, structured } = renderProfile({
+    title: "Runtime origin", config: loadConfig(), inclTotal: { Ir: 37 },
+    inclRows: rows, selfRows: rows, callGraph: parseCallGraph(CALL_GRAPH),
+  });
+  assert.match(markdown, /`____strtod_l_internal` \(`Physics::load`, `Demo::load`\)/);
+  assert.match(markdown, /`void std::helper<char>\(\)` \(30\)/);
+  assert.doesNotMatch(markdown, /strtod_l\.c|Source \/ package/);
+  assert.equal(structured.top_routines[0].nearest_project_callers.length, 2);
+  assert.equal(callableName("std::function<void()> App::read[abi:cxx11]()"), "App::read[abi:cxx11]");
+  assert.equal(callableName("App::operator()(int) const"), "App::operator()");
+});
+
+test("many project caller names are compact while JSON retains all caller records", () => {
+  const names = [
+    "Project::one(int)", "Project::two(double)", "Project::three()",
+    "Project::four()", "Project::five()", "Project::one(int)",
+  ];
+  const raw = names.map((name, index) => `ob=/o/part-${index}.so
+fn=${name}
+cob=/lib/libc.so.6
+cfn=malloc
+calls=${index + 1} 1
+1 ${index + 1}
+`).join("\n");
+  const rows = [["malloc", { Ir: 21 }]];
+  const result = renderProfile({
+    title: "Many callers", config: loadConfig(), inclTotal: { Ir: 21 },
+    inclRows: rows, selfRows: rows, callGraph: parseCallGraph(raw),
+  });
+  assert.match(result.markdown, /`malloc` \(`Project::five`, `Project::four`, `Project::one`; \+2 more\)/);
+  assert.equal(result.structured.top_routines[0].nearest_project_callers.length, names.length);
+  assert.equal(result.structured.top_routines[0].calls, 21);
+  assert.ok(result.structured.top_routines[0].nearest_project_callers
+    .some((caller) => caller.routine === names[1]));
+  const noMatch = renderProfile({
+    title: "No project match", config: loadConfig('{"project_callers":[]}'), inclTotal: { Ir: 21 },
+    inclRows: rows, selfRows: rows, callGraph: parseCallGraph(raw),
+  });
+  assert.match(noMatch.markdown, /`malloc` \|/);
 });
 
 test("summarizeCallgrind degrades gracefully when annotate fails", () => {
@@ -315,4 +591,78 @@ test("summarizeCallgrind degrades gracefully when annotate fails", () => {
   assert.match(result.markdown, /Profile summary unavailable/);
   assert.match(result.markdown, /0 bytes/);
   assert.ok(fs.existsSync(result.partialFile));
+});
+
+test("CI verification accepts zero entry calls and still rejects missing or incorrect counts", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "callgrinder-ci-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const workflow = fs.readFileSync(path.join(__dirname, "../.github/workflows/test.yml"), "utf8");
+  const verification = workflow.match(/node <<'EOF'\n([\s\S]*?)\n +EOF/)[1];
+  for (const incoming of [0, 1]) {
+    const parts = path.join(dir, `parts-${incoming}`);
+    fs.mkdirSync(parts);
+    const raw = `events: Ir
+ob=/o/callgrinder-smoke
+fl=(3) /o/startup.c
+fn=(3) startup
+jfi=(1) /o/smoke.c
+jfn=(1) main
+jump=1 1
+1 0
+${incoming ? "cfl=(1)\ncfn=(1)\ncalls=1 1\n1 3000000\n" : ""}fl=(1)
+fn=(1)
+1 2000000
+cfn=(2) workload
+calls=100000 1
+1 1000000
+fn=(2)
+1 1000000
+`;
+    const callgrindFile = path.join(parts, "callgrind.out.smoke");
+    fs.writeFileSync(callgrindFile, raw);
+    const rendered = renderProfile({
+      title: "smoke",
+      config: loadConfig('{"categories":[{"label":"Test workload","match":"^main$"}]}'),
+      inclTotal: { Ir: 3_000_000 },
+      inclRows: [["main", { Ir: 3_000_000 }], ["workload", { Ir: 1_000_000 }]],
+      selfRows: [
+        ["main", { Ir: 2_000_000 }, { source: "smoke.c" }],
+        ["workload", { Ir: 1_000_000 }, { source: "smoke.c" }],
+      ],
+      callGraph: parseCallGraph(raw),
+    });
+    const partial = { name: "smoke", markdown: rendered.markdown, ...rendered.structured };
+    const profileFile = path.join(parts, "profile-smoke.json");
+    const verify = () => {
+      fs.writeFileSync(profileFile, JSON.stringify(partial));
+      const report = createReport({
+        inputDirectory: parts, outputDirectory: path.join(dir, `report-${incoming}`),
+      });
+      return spawnSync(process.execPath, ["-"], {
+        input: verification, encoding: "utf8",
+        env: {
+          ...process.env, JOB_COUNT: "1", PROFILE_FILE: profileFile, CALLGRIND_FILE: callgrindFile,
+          REPORT_FILE: report.jsonFile, SUMMARY_FILE: report.summaryFile, CSV_FILE: report.csvFile,
+        },
+      });
+    };
+    const success = verify();
+    assert.equal(success.status, 0, success.stderr);
+    const main = partial.top_routines.find((row) => row.routine === "main");
+    assert.equal(main.calls, incoming);
+    main.calls = null;
+    const missing = verify();
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /nonnegative recorded call count for main/);
+    main.calls = incoming;
+    partial.top_routines.find((row) => row.routine === "workload").calls = 99999;
+    const incorrect = verify();
+    assert.notEqual(incorrect.status, 0);
+    assert.match(incorrect.stderr, /99999/);
+    partial.top_routines.find((row) => row.routine === "workload").calls = 100000;
+    partial.markdown += "\n_Call counts and callers unavailable: fixture parse error_\n";
+    const diagnostic = verify();
+    assert.notEqual(diagnostic.status, 0);
+    assert.match(diagnostic.stderr, /fixture parse error/);
+  }
 });

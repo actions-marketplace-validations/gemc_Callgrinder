@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { annotate, parseAnnotate, parseCallCounts, runCallgrind } = require("./callgrind");
+const { annotate, parseAnnotate, parseCallGraph, runCallgrind } = require("./callgrind");
 const { loadConfig } = require("./categories");
 const { renderProfile } = require("./report");
 const { ensureDirectory, slugify } = require("./utils");
@@ -81,11 +81,11 @@ function summarizeCallgrind({
   let markdown;
   let structured = { total: {}, categories: [], top_routines: [] };
   if (inclusive) {
-    let callsByFunc = new Map();
+    let callGraph;
     try {
-      callsByFunc = parseCallCounts(fs.readFileSync(callgrindFile, "utf8"));
+      callGraph = parseCallGraph(fs.readFileSync(callgrindFile, "utf8"));
     } catch (error) {
-      notes.push(`Call counts unavailable: ${error.message}`);
+      notes.push(`Call counts and callers unavailable: ${error.message}`);
     }
     const rendered = renderProfile({
       title: name,
@@ -93,7 +93,7 @@ function summarizeCallgrind({
       inclTotal: inclusive.total,
       inclRows: inclusive.rows,
       selfRows,
-      callsByFunc,
+      callGraph,
     });
     markdown = rendered.markdown;
     structured = rendered.structured;
