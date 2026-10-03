@@ -22,6 +22,13 @@ function loadConfig(source) {
   if (!Array.isArray(config.categories)) {
     throw new Error("config.categories must be an array");
   }
+  if (config.project_callers !== undefined) {
+    if (!Array.isArray(config.project_callers) ||
+        !config.project_callers.every((value) => typeof value === "string")) {
+      throw new Error("config.project_callers must be an array of regex strings");
+    }
+    config.project_callers.forEach((pattern) => new RegExp(pattern));
+  }
   for (const category of config.categories) {
     if (!category.match && !category.discover) {
       throw new Error(`category needs a "match" or "discover" pattern: ${JSON.stringify(category)}`);
@@ -73,6 +80,7 @@ function collectRows(config, inclRows, selfRows) {
         symbol: category.match,
         incl: inclOf(names),
         self: selfOf(names),
+        routines: [...new Set(names)],
       });
     } else {
       const pattern = new RegExp(category.discover);
@@ -97,6 +105,7 @@ function collectRows(config, inclRows, selfRows) {
         symbol: `${klass}::${method}`,
         incl: inclOf(names),
         self: selfOf(names),
+        routines: [...new Set(names)],
       }));
       rows.sort((a, b) => b.incl - a.incl);
       table.push(...rows);

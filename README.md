@@ -114,6 +114,23 @@ class in group 1 and reports one row per class found — e.g. every plugin of a 
 `config` accepts a file path or inline JSON. See [GEMC3](examples/gemc3.json) and [GEMC2](examples/gemc2.json)
 for application-specific examples.
 
+The optional `project_callers` array defines which routines count as project callers when looking upstream
+through runtime functions. Each regex matches a routine name, source path, or binary/library path separately:
+
+```json
+{
+  "project_callers": ["^MyApp::", "libMyPhysics", "/work/my-project/"],
+  "categories": [
+    { "label": "Input", "match": "MyApp::read" }
+  ]
+}
+```
+
+Without this setting, Callgrinder treats named routines outside common C/C++ runtime libraries and namespaces
+as project routines. This inference includes application dependencies and is independent of any framework.
+Use explicit patterns for custom runtimes or to focus on selected libraries. An empty array disables project
+caller matches. Caller reporting and this setting are **upcoming in the next release**.
+
 <br/>
 
 ## Try it in GitHub Actions
@@ -166,20 +183,28 @@ defined your categories. The Action supplies its own Node.js runtime.
 
 ## What the summary reports
 
-- **Category table** — inclusive cost includes work in the entry routines and their callees. The
-  `Inclusive % (overlapping)` column is not additive: the same work can appear in several categories.
-  `Entry self %` counts only direct work in the matched entries; overlapping patterns can repeat that work.
-- **Top routines** — select the routines with the highest `Self %`, then order those routines by inclusive
-  `% of run`, largest first, with that column before `Self %`. This selection rule is
-  **upcoming in the next release**.
-  Inclusive shares include callees and overlap; only self shares sum to at most 100%, apart from rounding.
-  Listed and remaining self-cost shares appear below the table. **Source / package** shows the source
-  filename, or the binary/library name when source information is unavailable. **Calls** shows recorded
-  incoming calls, summed across callers and object copies, including recursion; it is zero for routines
-  with no recorded incoming calls. Missing information appears as `—`. These two columns are
-  **upcoming in the next release** and are also included as `source` and `calls` in JSON results.
-  Unresolved addresses are labelled with their object when available. Regenerate existing partial JSON
-  reports with `--from-callgrind` to populate the new columns.
+- **Two tables with matching columns** — the category table groups the configured entry routines; the
+  top-routines table selects individual routines with the highest `Self %`, then orders them by inclusive
+  `% of run`, largest first. Both show category, source, symbols, inclusive and self Mcycles, `% of run`,
+  `Self %`, total `Calls`, direct callers with counts, and nearest project callers.
+  Matching columns and caller attribution are **upcoming in the next release**.
+- **Costs** — inclusive cost includes callees and overlaps, so neither table's `% of run` may be added.
+  Self cost counts only work directly in the named routines. Category rows aggregate their matched entries;
+  overlapping category patterns can repeat work. Individual self shares sum to at most 100%, apart from
+  rounding. Listed and remaining self-cost shares appear below the top-routines table.
+- **Source / package** — source filenames omit directory paths; missing source information falls back to
+  binary/library names. A routine with work attributed to several files lists those filenames.
+  Unresolved addresses are labelled with their object when available.
+- **Calls and direct callers** — counts sum recorded incoming calls, including recursion and object copies.
+  Each direct caller is listed with its own count, largest first. Categories count each matched routine
+  once, including calls between matched routines. Zero means no recorded incoming calls.
+- **Nearest project caller** — follow each upstream branch past runtime functions to its first project
+  caller, showing the shortest distance to that caller in call-graph hops. Ownership uses runtime-name
+  inference or `project_callers`. Recursive cycles are bounded. Aggregate profiles describe observed call
+  edges, not dynamic stack traces, so upstream callers are not assigned inferred call counts.
+- Source and caller fields are also included in JSON results for both tables. `—` means missing information
+  or no matching caller. Regenerate existing partial JSON reports with `--from-callgrind` to populate these
+  fields; the application does not need to be profiled again. The category CSV retains its cost columns.
 - The function-table parsing fix shipped in v1.0.6. Regenerate older partial JSON reports with
   `--from-callgrind`; the application does not need to be profiled again.
 - Cost is CEst (`Ir + 10·L1_misses + 100·LL_misses`), matching qcachegrind's cycle estimation. The report ends
