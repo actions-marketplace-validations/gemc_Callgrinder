@@ -4,10 +4,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const {
   cest, isNamedRoutine, locationToFunc, parseAnnotate, parseCallCounts, parseCallGraph,
 } = require("../src/callgrind");
-const { callerInfo } = require("../src/callers");
+const { callableName, callerInfo } = require("../src/callers");
 const { collectRows, loadConfig } = require("../src/categories");
 const { createReport, renderProfile, topRoutines } = require("../src/report");
 const { summarizeCallgrind } = require("../src/profile");
@@ -274,7 +275,7 @@ calls=7 0
   assert.throws(() => parseCallCounts("cfn=(99)"), /undefined Callgrind name ID/);
 });
 
-test("ABI-tagged symbols retain their incoming calls and source basename in the summary", () => {
+test("ABI-tagged symbols retain incoming calls in the summary and source metadata in JSON", () => {
   const { total, rows } = parseAnnotate(`Events shown: Ir
 100 PROGRAM TOTALS
 Ir file:function
@@ -299,7 +300,7 @@ calls=2 1
     callsByFunc,
   });
   assert.equal(callsByFunc.get("Example::name[abi:cxx11]()"), 9);
-  assert.match(markdown, /\| 1 \| — \| `name.cc` \| `Example::name\[abi:cxx11\]\(\)` \|.* \| 9 \|/);
+  assert.match(markdown, /\| 1 \| — \| `Example::name\[abi:cxx11\]\(\)` \|.* \| 9 \|/);
   assert.doesNotMatch(markdown, /\/build\//);
   assert.equal(structured.top_routines[0].source, "name.cc");
   assert.equal(structured.top_routines[0].calls, 9);
@@ -384,7 +385,8 @@ test("renderProfile emits both tables and excludes the artifact routine", () => 
   const headers = markdown.split("\n").filter((line) => line.startsWith("| # |"));
   assert.equal(headers.length, 2);
   assert.equal(headers[0], headers[1]);
-  assert.match(headers[0], /Inclusive \(Mcycles\).*Self \(Mcycles\).*Direct callers.*Nearest project caller/);
+  assert.match(headers[0], /Inclusive \(Mcycles\).*Self \(Mcycles\).*Direct callers/);
+  assert.doesNotMatch(headers[0], /Source|Nearest project caller/);
   assert.match(markdown, /Top \d+ routines by self cost, ordered by inclusive cost/);
   assert.doesNotMatch(markdown, /events annotated/);
 });
@@ -401,14 +403,14 @@ test("top routines are selected by self cost before ordering by inclusive share"
     inclRows: [["A", { Ir: 1_000_000 }], ["B", { Ir: 800_000 }], ["C", { Ir: 900_000 }]],
     selfRows: [["A", { Ir: 200_000 }], ["B", { Ir: 500_000 }], ["C", { Ir: 300_000 }]],
   });
-  assert.match(markdown, /\| # \| Category \| Source \/ package \| Routine \/ entry symbol\(s\) \|/);
+  assert.match(markdown, /\| # \| Category \| Routine \/ entry symbol\(s\) \|/);
   assert.match(markdown, /Selected by highest \*\*Self %\*\*, then ordered by \*\*% of run\*\*/);
-  assert.match(markdown, /\| 1 \| — \| — \| `C` \| 0.9 \| 0.3 \| 90.00% \| 30.00% \| — \|/);
-  assert.match(markdown, /\| 2 \| B \| — \| `B` \| 0.8 \| 0.5 \| 80.00% \| 50.00% \| — \|/);
+  assert.match(markdown, /\| 1 \| — \| `C` \| 0.9 \| 0.3 \| 90.00% \| 30.00% \| — \|/);
+  assert.match(markdown, /\| 2 \| B \| `B` \| 0.8 \| 0.5 \| 80.00% \| 50.00% \| — \|/);
   assert.match(markdown, /Self cost of listed routines: \*\*80.00%\*\*/);
   assert.match(markdown, /Self cost of remaining routines: \*\*20.00%\*\*/);
-  assert.match(markdown, /\| A \| — \| `\^A\$` \| 1.0 \| 0.2 \| 100.00% \| 20.00% \|/);
-  assert.match(markdown, /\| B \| — \| `\^B\$` \| 0.8 \| 0.5 \| 80.00% \| 50.00% \|/);
+  assert.match(markdown, /\| A \| `\^A\$` \| 1.0 \| 0.2 \| 100.00% \| 20.00% \|/);
+  assert.match(markdown, /\| B \| `\^B\$` \| 0.8 \| 0.5 \| 80.00% \| 50.00% \|/);
   assert.deepEqual(structured.top_routines, [
     {
       routine: "C", incl: 900_000, self: 300_000, source: null, calls: null, categories: [],
@@ -435,8 +437,9 @@ test("routine metadata combines sources without double-counting the two annotati
     selfRows: rows,
     callsByFunc: new Map([["Dispatch::run()", 1234], ["root", 0]]),
   });
-  assert.match(markdown, /`a.cc, plugin.so` \| `Dispatch::run\(\)` \|.* \| 1,234 \|/);
-  assert.match(markdown, /`main.cc` \| `root` \|.* \| 0 \|/);
+  assert.match(markdown, /`Dispatch::run\(\)` \|.* \| 1,234 \|/);
+  assert.match(markdown, /`root` \|.* \| 0 \|/);
+  assert.doesNotMatch(markdown, /a\.cc|plugin\.so|main\.cc/);
   assert.equal(structured.top_routines[0].calls, 1234);
   assert.equal(structured.top_routines[0].source, "a.cc, plugin.so");
 });
@@ -464,7 +467,7 @@ calls=5539090 1
     name: "counts", callgrindFile: file, outputDirectory: dir,
     config: JSON.stringify({ categories: [{ label: "Field", match: "^GField_" }] }),
   });
-  assert.match(result.markdown, /`gfield.cc` \| `GField_/);
+  assert.doesNotMatch(result.markdown, /gfield\.cc/);
   assert.match(result.markdown, /\| 5,539,090 \|/);
   const partial = JSON.parse(fs.readFileSync(result.partialFile, "utf8"));
   const field = partial.top_routines.find((row) => row.routine.startsWith("GField_"));
@@ -477,11 +480,11 @@ calls=5539090 1
   assert.equal(category.calls, field.calls);
   assert.deepEqual(category.direct_callers, field.direct_callers);
   assert.deepEqual(category.nearest_project_callers, field.nearest_project_callers);
-  assert.match(result.markdown, /`main` \(5,539,090\).*`main` \(1 hop\)/);
+  assert.match(result.markdown, /`GField_[^\n]+` \(`main`\).*`main` \(5,539,090\)/);
   const report = createReport({ inputDirectory: dir, outputDirectory: path.join(dir, "report") });
   const summary = fs.readFileSync(report.summaryFile, "utf8");
-  assert.match(summary, /\| # \| Category \| Source \/ package \|.* \| Calls \| Direct callers/);
-  assert.match(summary, /`gfield.cc` \| `GField_.* \| 5,539,090 \|/);
+  assert.match(summary, /\| # \| Category \|.* \| Calls \| Direct callers/);
+  assert.match(summary, /`GField_.* \(`main`\).* \| 5,539,090 \|/);
   assert.doesNotMatch(summary, /\/o\//);
   assert.deepEqual(JSON.parse(fs.readFileSync(report.jsonFile, "utf8")), [partial]);
 });
@@ -491,6 +494,49 @@ test("topRoutines selects by self cost and drops artifacts", () => {
   const ranked = topRoutines(rows, 10).map(([func]) => func);
   assert.equal(ranked[0], "G4PropagatorInField::ComputeStep(G4FieldTrack&)");
   assert.ok(!ranked.includes("events annotated"));
+});
+
+test("inline project caller names identify the code behind runtime helper calls", () => {
+  const rows = [["____strtod_l_internal", { Ir: 37 }, { source: "strtod_l.c" }]];
+  const { markdown, structured } = renderProfile({
+    title: "Runtime origin", config: loadConfig(), inclTotal: { Ir: 37 },
+    inclRows: rows, selfRows: rows, callGraph: parseCallGraph(CALL_GRAPH),
+  });
+  assert.match(markdown, /`____strtod_l_internal` \(`Physics::load`, `Demo::load`\)/);
+  assert.match(markdown, /`void std::helper<char>\(\)` \(30\)/);
+  assert.doesNotMatch(markdown, /strtod_l\.c|Source \/ package/);
+  assert.equal(structured.top_routines[0].nearest_project_callers.length, 2);
+  assert.equal(callableName("std::function<void()> App::read[abi:cxx11]()"), "App::read[abi:cxx11]");
+  assert.equal(callableName("App::operator()(int) const"), "App::operator()");
+});
+
+test("many project caller names are compact while JSON retains all caller records", () => {
+  const names = [
+    "Project::one(int)", "Project::two(double)", "Project::three()",
+    "Project::four()", "Project::five()", "Project::one(int)",
+  ];
+  const raw = names.map((name, index) => `ob=/o/part-${index}.so
+fn=${name}
+cob=/lib/libc.so.6
+cfn=malloc
+calls=${index + 1} 1
+1 ${index + 1}
+`).join("\n");
+  const rows = [["malloc", { Ir: 21 }]];
+  const result = renderProfile({
+    title: "Many callers", config: loadConfig(), inclTotal: { Ir: 21 },
+    inclRows: rows, selfRows: rows, callGraph: parseCallGraph(raw),
+  });
+  assert.match(result.markdown, /`malloc` \(`Project::five`, `Project::four`, `Project::one`; \+2 more\)/);
+  assert.equal(result.structured.top_routines[0].nearest_project_callers.length, names.length);
+  assert.equal(result.structured.top_routines[0].calls, 21);
+  assert.ok(result.structured.top_routines[0].nearest_project_callers
+    .some((caller) => caller.routine === names[1]));
+  const noMatch = renderProfile({
+    title: "No project match", config: loadConfig('{"project_callers":[]}'), inclTotal: { Ir: 21 },
+    inclRows: rows, selfRows: rows, callGraph: parseCallGraph(raw),
+  });
+  assert.match(noMatch.markdown, /`malloc` \|/);
 });
 
 test("summarizeCallgrind degrades gracefully when annotate fails", () => {
@@ -508,4 +554,72 @@ test("summarizeCallgrind degrades gracefully when annotate fails", () => {
   assert.match(result.markdown, /Profile summary unavailable/);
   assert.match(result.markdown, /0 bytes/);
   assert.ok(fs.existsSync(result.partialFile));
+});
+
+test("CI verification accepts zero entry calls and still rejects missing or incorrect counts", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "callgrinder-ci-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const workflow = fs.readFileSync(path.join(__dirname, "../.github/workflows/test.yml"), "utf8");
+  const verification = workflow.match(/node <<'EOF'\n([\s\S]*?)\n +EOF/)[1];
+  for (const incoming of [0, 1]) {
+    const parts = path.join(dir, `parts-${incoming}`);
+    fs.mkdirSync(parts);
+    const raw = `events: Ir
+ob=/o/callgrinder-smoke
+fl=/o/smoke.c
+${incoming ? "fn=(3) startup\ncfn=(1) main\ncalls=1 1\n1 3000000\n" : ""}fn=(1) main
+1 2000000
+cfn=(2) workload
+calls=100000 1
+1 1000000
+fn=(2)
+1 1000000
+`;
+    const callgrindFile = path.join(parts, "callgrind.out.smoke");
+    fs.writeFileSync(callgrindFile, raw);
+    const rendered = renderProfile({
+      title: "smoke",
+      config: loadConfig('{"categories":[{"label":"Test workload","match":"^main$"}]}'),
+      inclTotal: { Ir: 3_000_000 },
+      inclRows: [["main", { Ir: 3_000_000 }], ["workload", { Ir: 1_000_000 }]],
+      selfRows: [
+        ["main", { Ir: 2_000_000 }, { source: "smoke.c" }],
+        ["workload", { Ir: 1_000_000 }, { source: "smoke.c" }],
+      ],
+      callGraph: parseCallGraph(raw),
+    });
+    const partial = { name: "smoke", markdown: rendered.markdown, ...rendered.structured };
+    const profileFile = path.join(parts, "profile-smoke.json");
+    const verify = () => {
+      fs.writeFileSync(profileFile, JSON.stringify(partial));
+      const report = createReport({
+        inputDirectory: parts, outputDirectory: path.join(dir, `report-${incoming}`),
+      });
+      return spawnSync(process.execPath, ["-"], {
+        input: verification, encoding: "utf8",
+        env: {
+          ...process.env, JOB_COUNT: "1", PROFILE_FILE: profileFile, CALLGRIND_FILE: callgrindFile,
+          REPORT_FILE: report.jsonFile, SUMMARY_FILE: report.summaryFile, CSV_FILE: report.csvFile,
+        },
+      });
+    };
+    const success = verify();
+    assert.equal(success.status, 0, success.stderr);
+    const main = partial.top_routines.find((row) => row.routine === "main");
+    assert.equal(main.calls, incoming);
+    main.calls = null;
+    const missing = verify();
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /nonnegative recorded call count for main/);
+    main.calls = incoming;
+    partial.top_routines.find((row) => row.routine === "workload").calls = 99999;
+    const incorrect = verify();
+    assert.notEqual(incorrect.status, 0);
+    assert.match(incorrect.stderr, /99999/);
+    partial.top_routines.find((row) => row.routine === "workload").calls = 100000;
+    partial.markdown += "\n_Call counts and callers unavailable: fixture parse error_\n";
+    const diagnostic = verify();
+    assert.notEqual(diagnostic.status, 0);
+    assert.match(diagnostic.stderr, /fixture parse error/);
+  }
 });

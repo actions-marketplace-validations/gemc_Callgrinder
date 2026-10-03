@@ -20,13 +20,17 @@ function callableName(routine) {
     } else if (char === ">" && depth > 0) {
       depth -= 1;
     } else if (char === "(" && depth === 0) {
+      if (routine.slice(start, index).endsWith("operator") && routine.slice(index, index + 2) === "()") {
+        index += 1;
+        continue;
+      }
       end = index;
       break;
     } else if (/\s/.test(char) && depth === 0 && !routine.slice(start, index).includes("operator")) {
       start = index + 1;
     }
   }
-  return routine.slice(start, end);
+  return routine.slice(start, end).trim();
 }
 
 function callerInfo(callGraph, config = {}) {
@@ -114,4 +118,4 @@ function callerInfo(callGraph, config = {}) {
   };
 }
 
-module.exports = { callerInfo };
+module.exports = { callableName, callerInfo };

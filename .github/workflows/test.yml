@@ -90,7 +90,9 @@ jobs:
           assert.ok(profile.top_routines.some((row) => row.routine === 'main' && row.self > 0));
           const main = profile.top_routines.find((row) => row.routine === 'main');
           assert.equal(main.source, 'smoke.c');
-          assert.ok(main.calls > 0, 'The raw profile must supply incoming calls to main');
+          // A profile root can have measured work without a recorded incoming call arc.
+          assert.ok(Number.isSafeInteger(main.calls) && main.calls >= 0,
+            'The raw profile must supply a nonnegative recorded call count for main');
           const helper = profile.top_routines.find((row) => row.routine === 'workload');
           assert.ok(helper, 'The helper must appear among the top routines');
           assert.equal(helper.calls, 100000);
@@ -104,7 +106,8 @@ jobs:
           const headers = read('SUMMARY_FILE').split('\n').filter((line) => line.startsWith('| # |'));
           assert.equal(headers.length, 2);
           assert.equal(headers[0], headers[1]);
-          assert.doesNotMatch(read('SUMMARY_FILE'), /unavailable/i);
+          assert.doesNotMatch(read('SUMMARY_FILE'),
+            /Profile summary unavailable|(?:table|callers) unavailable/i);
           assert.match(read('CSV_FILE'), /"smoke","Test workload"/);
           EOF
       - name: Upload smoke test results

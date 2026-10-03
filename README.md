@@ -185,26 +185,28 @@ defined your categories. The Action supplies its own Node.js runtime.
 
 - **Two tables with matching columns** — the category table groups the configured entry routines; the
   top-routines table selects individual routines with the highest `Self %`, then orders them by inclusive
-  `% of run`, largest first. Both show category, source, symbols, inclusive and self Mcycles, `% of run`,
-  `Self %`, total `Calls`, direct callers with counts, and nearest project callers.
+  `% of run`, largest first. Both show category, symbols with project caller names in parentheses,
+  inclusive and self Mcycles, `% of run`, `Self %`, total `Calls`, and direct callers with counts.
   Matching columns and caller attribution are **upcoming in the next release**.
 - **Costs** — inclusive cost includes callees and overlaps, so neither table's `% of run` may be added.
   Self cost counts only work directly in the named routines. Category rows aggregate their matched entries;
   overlapping category patterns can repeat work. Individual self shares sum to at most 100%, apart from
   rounding. Listed and remaining self-cost shares appear below the top-routines table.
-- **Source / package** — source filenames omit directory paths; missing source information falls back to
-  binary/library names. A routine with work attributed to several files lists those filenames.
-  Unresolved addresses are labelled with their object when available.
 - **Calls and direct callers** — counts sum recorded incoming calls, including recursion and object copies.
   Each direct caller is listed with its own count, largest first. Categories count each matched routine
   once, including calls between matched routines. Zero means no recorded incoming calls.
-- **Nearest project caller** — follow each upstream branch past runtime functions to its first project
-  caller, showing the shortest distance to that caller in call-graph hops. Ownership uses runtime-name
-  inference or `project_callers`. Recursive cycles are bounded. Aggregate profiles describe observed call
-  edges, not dynamic stack traces, so upstream callers are not assigned inferred call counts.
+- **Project callers in parentheses** — for a routine such as `malloc` or `strtod`, follow each upstream
+  branch past runtime functions to its first project caller. The routine cell includes those function names,
+  for example `strtod (MyApp::readValue)`, identifying the application or library code responsible for the
+  observed calls. Up to three distinct names appear; `+N more` marks additional names. Full signatures and
+  shortest hop distances are available in JSON. This compact display is **upcoming in the next release**.
+  Ownership uses runtime-name inference or `project_callers`, independent of any framework. Recursive cycles
+  are bounded. Aggregate profiles describe observed edges, so upstream callers have no inferred call counts.
 - Source and caller fields are also included in JSON results for both tables. `—` means missing information
   or no matching caller. Regenerate existing partial JSON reports with `--from-callgrind` to populate these
   fields; the application does not need to be profiled again. The category CSV retains its cost columns.
+- The tables omit source/package lists. JSON retains source metadata, and unresolved addresses are labelled
+  with their object when available.
 - The function-table parsing fix shipped in v1.0.6. Regenerate older partial JSON reports with
   `--from-callgrind`; the application does not need to be profiled again.
 - Cost is CEst (`Ir + 10·L1_misses + 100·LL_misses`), matching qcachegrind's cycle estimation. The report ends

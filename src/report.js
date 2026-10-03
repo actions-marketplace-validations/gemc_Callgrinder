@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { cest, isNamedRoutine } = require("./callgrind");
 const { collectRows, inclByName, selfByName } = require("./categories");
-const { callerInfo } = require("./callers");
+const { callableName, callerInfo } = require("./callers");
 const { ensureDirectory, walkJsonFiles } = require("./utils");
 
 const mcycles = (value) =>
@@ -63,24 +63,27 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows, callGraph
   // Both tables share the renderer so their columns, units, and formatting always agree.
   const table = (entries) => {
     const lines = [
-      "| # | Category | Source / package | Routine / entry symbol(s) | Inclusive (Mcycles) | " +
-        "Self (Mcycles) | % of run | Self % | Calls | Direct callers (calls) | Nearest project caller |",
-      "|---|----------|------------------|---------------------------|--------------------:|" +
-        "---------------:|---------:|-------:|------:|------------------------|------------------------|",
+      "| # | Category | Routine / entry symbol(s) | Inclusive (Mcycles) | " +
+        "Self (Mcycles) | % of run | Self % | Calls | Direct callers (calls) |",
+      "|---|----------|---------------------------|--------------------:|" +
+        "---------------:|---------:|-------:|------:|------------------------|",
     ];
     entries.forEach((row, index) => {
       const category = row.label || row.categories.join(", ") || "—";
-      const source = row.source ? `\`${escapePipes(row.source)}\`` : "—";
       const direct = row.direct_callers.map((caller) =>
         `\`${shorten(caller.routine)}\` (${caller.calls.toLocaleString("en-US")})`).join("<br>") || "—";
-      const project = row.nearest_project_callers.map((caller) =>
-        `\`${shorten(caller.routine)}\` (${caller.distance} ${caller.distance === 1 ? "hop" : "hops"})`
-      ).join("<br>") || "—";
+      const projectNames = [...new Set(
+        row.nearest_project_callers.map((caller) => callableName(caller.routine)),
+      )];
+      const project = projectNames.slice(0, 3).map((name) => `\`${shorten(name)}\``).join(", ");
+      const more = projectNames.length > 3 ? `; +${projectNames.length - 3} more` : "";
+      const context = project ? ` (${project}${more})` : "";
+      const symbol = `\`${shorten(row.routine || row.symbol)}\`${context}`;
       lines.push(
-        `| ${index + 1} | ${escapePipes(category)} | ${source} | ` +
-          `\`${shorten(row.routine || row.symbol)}\` | ${mcycles(row.incl)} | ${mcycles(row.self)} | ` +
+        `| ${index + 1} | ${escapePipes(category)} | ` +
+          `${symbol} | ${mcycles(row.incl)} | ${mcycles(row.self)} | ` +
           `${percent(row.incl, totalCest)}% | ${percent(row.self, totalCest)}% | ` +
-          `${row.calls === null ? "—" : row.calls.toLocaleString("en-US")} | ${direct} | ${project} |`,
+          `${row.calls === null ? "—" : row.calls.toLocaleString("en-US")} | ${direct} |`,
       );
     });
     return lines;
@@ -96,12 +99,12 @@ function renderProfile({ title, config, inclTotal, inclRows, selfRows, callGraph
     "Both tables use the same columns. Categories group the configured entry routines; the top table " +
       "lists individual routines. **% of run** includes callees and overlaps, so it must not be added. " +
       "**Self %** counts only direct work; overlapping category patterns can repeat that work.",
-    "Source / package shows filenames without paths, falling back to binary or library names. " +
-      "**Calls** sums recorded incoming calls, including recursion. **Direct callers** lists each caller " +
-      "with its recorded calls. **Nearest project caller** walks upstream past runtime functions " +
-      "and shows the first project caller on each branch, with its distance in call-graph hops. " +
-      "Project ownership is inferred from runtime names or configured with project_callers; " +
-      "— means no match or unavailable data.",
+    "Names in parentheses identify the nearest project callers, walking upstream past runtime functions " +
+      "such as malloc, strtod, and C++ stream helpers. Up to three distinct function names are shown; " +
+      "+N more indicates additional names, available in JSON with full signatures and hop distances. " +
+      "Project ownership is inferred from runtime names or configured with project_callers. " +
+      "**Calls** sums recorded incoming calls, including recursion; **Direct callers** lists each caller " +
+      "with its recorded calls. — means no match or unavailable data.",
     "",
   );
   lines.push(...table(rows));
